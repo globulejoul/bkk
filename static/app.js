@@ -759,6 +759,7 @@ async function loadFx() {
     $('#fx-current').innerHTML = `
       <div><span class="rate-big">1€ = ${latest.toFixed(2)} ฿</span></div>
       <div>${sign}${diff}% sur 6 mois</div>
+      <div class="fx-conversions">20฿ = ${(20/latest).toFixed(2)}€ · 100฿ = ${(100/latest).toFixed(2)}€ · 1000฿ = ${(1000/latest).toFixed(1)}€</div>
     `;
 
     const ctx = $('#fx-chart').getContext('2d');

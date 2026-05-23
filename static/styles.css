@@ -395,6 +395,11 @@ tbody tr:hover { background: var(--bg-elev); }
   gap: 1.5rem;
   flex-wrap: wrap;
 }
+.fx-conversions {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 0.25rem;
+}
 .weather-now .temp-big, .fx-now .rate-big {
   font-size: 1.8rem;
   font-weight: 700;
