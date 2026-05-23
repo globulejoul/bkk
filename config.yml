@@ -3,13 +3,12 @@
 # Vacances Zone A (Lyon) 2026-2027 — dates officielles
 # ═══════════════════════════════════════════════════════════════
 
-# Aéroports de départ — chaque combinaison est trackée séparément
-origins: [LYS, CDG, ORY]
+# Aéroports de départ
+origins: [CDG, LYS, BSL, GVA]
 
-# Destinations Thaïlande — Bangkok + alternatives
-# BKK Suvarnabhumi, DMK Don Mueang (Bangkok 2nd airport),
-# HKT Phuket, CNX Chiang Mai, KBV Krabi
-destinations: [BKK, DMK, HKT, CNX, KBV]
+# Destinations Thaïlande
+# BKK Suvarnabhumi, HKT Phuket
+destinations: [BKK, HKT]
 
 # Devise principale (ce que tu paies au final depuis la France)
 currency: EUR
