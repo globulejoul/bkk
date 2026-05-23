@@ -22,7 +22,6 @@ $$('.tabs button').forEach(b => {
     $('#tab-' + b.dataset.tab).classList.add('active');
     if (b.dataset.tab === 'trip') loadTripDetail();
     if (b.dataset.tab === 'alerts') loadAlerts();
-    if (b.dataset.tab === 'infos') loadInfos();
     if (b.dataset.tab === 'runs') loadRuns();
   });
 });
@@ -343,13 +342,49 @@ async function loadWeather() {
     `;
 
     const today = new Date().toISOString().slice(0, 10);
-    const labels = (daily.time || []).map(d => {
-      const label = new Date(d).toLocaleDateString('fr-FR', {weekday: 'short', day: 'numeric'});
-      return d === today ? '> ' + label : label;
-    });
+    const times = daily.time || [];
+    const todayIdx = times.indexOf(today);
+    const labels = times.map(d =>
+      new Date(d).toLocaleDateString('fr-FR', {weekday: 'short', day: 'numeric'})
+    );
+
+    // Point sizes: bigger for today
+    const pointRadii = times.map(d => d === today ? 6 : 2);
+    const pointBg = (color) => times.map(d => d === today ? color : color + '88');
 
     const ctx = $('#weather-chart').getContext('2d');
     if (weatherChart) weatherChart.destroy();
+
+    // Vertical line plugin for today
+    const todayLinePlugin = {
+      id: 'todayLine',
+      afterDraw(chart) {
+        if (todayIdx < 0) return;
+        const meta = chart.getDatasetMeta(0);
+        if (!meta.data[todayIdx]) return;
+        const x = meta.data[todayIdx].x;
+        const ctx = chart.ctx;
+        const top = chart.chartArea.top;
+        const bottom = chart.chartArea.bottom;
+        ctx.save();
+        ctx.strokeStyle = '#464d2c44';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x, top);
+        ctx.lineTo(x, bottom);
+        ctx.stroke();
+        ctx.restore();
+        // "Auj." label
+        ctx.save();
+        ctx.fillStyle = '#464d2c';
+        ctx.font = '10px JetBrains Mono';
+        ctx.textAlign = 'center';
+        ctx.fillText('auj.', x, top - 4);
+        ctx.restore();
+      }
+    };
+
     weatherChart = new Chart(ctx, {
       type: 'line',
       data: {
@@ -362,7 +397,8 @@ async function loadWeather() {
             backgroundColor: '#d35b1718',
             fill: true,
             tension: 0.4,
-            pointRadius: 2,
+            pointRadius: pointRadii,
+            pointBackgroundColor: pointBg('#d35b17'),
           },
           {
             label: 'Min °C',
@@ -371,7 +407,8 @@ async function loadWeather() {
             backgroundColor: '#00714c18',
             fill: true,
             tension: 0.4,
-            pointRadius: 2,
+            pointRadius: pointRadii,
+            pointBackgroundColor: pointBg('#00714c'),
           },
           {
             label: 'Ressenti max',
@@ -384,11 +421,16 @@ async function loadWeather() {
           },
         ],
       },
+      plugins: [todayLinePlugin],
       options: {
         responsive: true, maintainAspectRatio: false,
         plugins: { legend: { labels: { color: '#464d2c', font: { family: 'JetBrains Mono', size: 10 } } } },
         scales: {
-          x: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 9 }, maxRotation: 45 }, grid: { display: false } },
+          x: { ticks: {
+            color: (ctx) => times[ctx.index] === today ? '#464d2c' : '#a8a8a2',
+            font: (ctx) => ({ family: 'JetBrains Mono', size: 9, weight: times[ctx.index] === today ? 'bold' : 'normal' }),
+            maxRotation: 45,
+          }, grid: { display: false } },
           y: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 10 }, callback: v => v + '°' }, grid: { color: '#cfcdcb' } },
         },
       },
@@ -465,6 +507,7 @@ async function loadFx() {
 
 loadOverview();
 loadIntro();
+loadInfos();
 checkRunningState();
 setInterval(loadOverview, 60000);
 

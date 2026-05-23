@@ -29,7 +29,6 @@
   <button data-tab="overview" class="active">Vue d'ensemble</button>
   <button data-tab="trip">Détail période</button>
   <button data-tab="alerts">Alertes</button>
-  <button data-tab="infos">Infos</button>
   <button data-tab="runs">Logs</button>
 </nav>
 
@@ -37,6 +36,18 @@
   <!-- OVERVIEW -->
   <section id="tab-overview" class="tab active">
     <div id="trips-grid"></div>
+    <div class="infos-grid" style="margin-top:1.25rem">
+      <div class="info-card">
+        <h2>Bangkok <span class="dim">14 jours</span></h2>
+        <div id="weather-current" class="weather-now"></div>
+        <div class="chart-wrap"><canvas id="weather-chart"></canvas></div>
+      </div>
+      <div class="info-card">
+        <h2>EUR / THB <span class="dim">6 mois</span></h2>
+        <div id="fx-current" class="fx-now"></div>
+        <div class="chart-wrap"><canvas id="fx-chart"></canvas></div>
+      </div>
+    </div>
   </section>
 
   <!-- TRIP DETAIL -->
@@ -69,22 +80,6 @@
   <section id="tab-alerts" class="tab">
     <h2>Dernières alertes</h2>
     <div id="alerts-list"></div>
-  </section>
-
-  <!-- INFOS -->
-  <section id="tab-infos" class="tab">
-    <div class="infos-grid">
-      <div class="info-card">
-        <h2>Bangkok <span class="dim">14 jours</span></h2>
-        <div id="weather-current" class="weather-now"></div>
-        <div class="chart-wrap"><canvas id="weather-chart"></canvas></div>
-      </div>
-      <div class="info-card">
-        <h2>EUR / THB <span class="dim">6 mois</span></h2>
-        <div id="fx-current" class="fx-now"></div>
-        <div class="chart-wrap"><canvas id="fx-chart"></canvas></div>
-      </div>
-    </div>
   </section>
 
   <!-- RUNS -->
