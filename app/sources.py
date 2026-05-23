@@ -200,11 +200,11 @@ DUFFEL_BASE = "https://api.duffel.com"
 
 
 def search_duffel(*, origins: list[str], destinations: list[str],
-                  outbound_date: str, return_date: str,
+                  outbound_dates: list[str], return_dates: list[str],
                   adults: int = 1, currency: str = "EUR",
                   max_fly_h: int = 18) -> list[FlightResult]:
-    """Search flights via Duffel API.
-    One call per (origin, dest) pair. Regroups results."""
+    """Search flights via Duffel API across all date combos.
+    Iterates (origin, dest, outbound_date, return_date) combinations."""
     token = os.environ.get("DUFFEL_API_KEY") or os.environ.get("DUFFEL")
     if not token:
         return []
@@ -217,46 +217,60 @@ def search_duffel(*, origins: list[str], destinations: list[str],
     }
 
     all_results: list[FlightResult] = []
+    total = len(origins) * len(destinations) * len(outbound_dates) * len(return_dates)
+    done = 0
+    consecutive_429 = 0
 
-    for orig in origins:
-        for dest in destinations:
-            try:
-                body = {
-                    "data": {
-                        "slices": [
-                            {"origin": orig, "destination": dest,
-                             "departure_date": outbound_date},
-                            {"origin": dest, "destination": orig,
-                             "departure_date": return_date},
-                        ],
-                        "passengers": [{"type": "adult"} for _ in range(adults)],
-                        "cabin_class": "economy",
-                    }
-                }
-                r = requests.post(
-                    f"{DUFFEL_BASE}/air/offer_requests",
-                    json=body, headers=headers,
-                    params={"return_offers": "true", "supplier_timeout": "30000"},
-                    timeout=45,
-                )
-                if r.status_code not in (200, 201):
-                    print(f"  Duffel {orig}→{dest}: HTTP {r.status_code}")
-                    continue
+    for out_d in outbound_dates:
+        for ret_d in return_dates:
+            for orig in origins:
+                for dest in destinations:
+                    done += 1
+                    if consecutive_429 >= 5:
+                        print(f"  Duffel: trop de 429, skip restant ({done}/{total})")
+                        all_results.sort(key=lambda r: r.price or 1e9)
+                        return all_results
+                    try:
+                        body = {
+                            "data": {
+                                "slices": [
+                                    {"origin": orig, "destination": dest,
+                                     "departure_date": out_d},
+                                    {"origin": dest, "destination": orig,
+                                     "departure_date": ret_d},
+                                ],
+                                "passengers": [{"type": "adult"} for _ in range(adults)],
+                                "cabin_class": "economy",
+                            }
+                        }
+                        r = requests.post(
+                            f"{DUFFEL_BASE}/air/offer_requests",
+                            json=body, headers=headers,
+                            params={"return_offers": "true", "supplier_timeout": "20000"},
+                            timeout=30,
+                        )
+                        if r.status_code == 429:
+                            consecutive_429 += 1
+                            time.sleep(2.0)
+                            continue
+                        consecutive_429 = 0
+                        if r.status_code not in (200, 201):
+                            continue
 
-                data = r.json().get("data", {})
-                offers = data.get("offers", [])
+                        offers = r.json().get("data", {}).get("offers", [])
+                        for offer in offers:
+                            parsed = _parse_duffel_offer(offer, orig, dest,
+                                                         out_d, ret_d, max_fly_h)
+                            if parsed:
+                                all_results.append(parsed)
 
-                for offer in offers:
-                    parsed = _parse_duffel_offer(offer, orig, dest,
-                                                 outbound_date, return_date,
-                                                 max_fly_h)
-                    if parsed:
-                        all_results.append(parsed)
+                    except Exception as e:
+                        print(f"  Duffel {orig}→{dest} {out_d}/{ret_d} error: {e}")
 
-            except Exception as e:
-                print(f"  Duffel {orig}→{dest} error: {e}")
+                    time.sleep(0.5)
 
-            time.sleep(0.5)
+            if done % 24 == 0:
+                print(f"  Duffel: {done}/{total} appels ({len(all_results)} résultats)")
 
     all_results.sort(key=lambda r: r.price or 1e9)
     return all_results
@@ -410,3 +424,16 @@ def mid_date(window: tuple[str, str]) -> str:
     d2 = datetime.strptime(window[1], "%Y-%m-%d")
     mid = d1 + (d2 - d1) / 2
     return mid.strftime("%Y-%m-%d")
+
+
+def date_range(window: tuple[str, str]) -> list[str]:
+    """Return all dates in a window (inclusive), as YYYY-MM-DD strings."""
+    from datetime import timedelta
+    d1 = datetime.strptime(window[0], "%Y-%m-%d")
+    d2 = datetime.strptime(window[1], "%Y-%m-%d")
+    dates = []
+    cur = d1
+    while cur <= d2:
+        dates.append(cur.strftime("%Y-%m-%d"))
+        cur += timedelta(days=1)
+    return dates

@@ -45,27 +45,30 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
     today = date.today().isoformat()
     now = datetime.now().isoformat()
 
-    # Date médiane de chaque fenêtre pour la recherche
-    out_date = sources.mid_date(trip.outbound_window)
-    ret_date = sources.mid_date(trip.return_window)
+    # Toutes les dates des fenêtres
+    out_dates = sources.date_range(trip.outbound_window)
+    ret_dates = sources.date_range(trip.return_window)
+    out_mid = sources.mid_date(trip.outbound_window)
+    ret_mid = sources.mid_date(trip.return_window)
+    nb_combos = len(out_dates) * len(ret_dates)
 
-    # 1) Google Flights via fli (source primaire)
-    print(f"\n→ {trip.name}: Google Flights {out_date} / {ret_date}")
+    # 1) Google Flights via fli (date médiane uniquement, scraping)
+    print(f"\n→ {trip.name}: fli {out_mid}/{ret_mid} + Duffel {nb_combos} combos dates")
     ff_results = sources.search_google_flights_multi(
         origins=cfg.origins, destinations=cfg.destinations,
-        outbound_date=out_date, return_date=ret_date,
+        outbound_date=out_mid, return_date=ret_mid,
         adults=cfg.adults, max_fly_h=cfg.max_fly_duration_hours,
     )
-    print(f"  Google Flights: {len(ff_results)} résultats valides")
+    print(f"  Google Flights: {len(ff_results)} résultats (date médiane)")
 
-    # 2) Duffel : source compagnies directes (même dates)
+    # 2) Duffel : toutes les combos dates × toutes les paires
     duffel_results = sources.search_duffel(
         origins=cfg.origins, destinations=cfg.destinations,
-        outbound_date=out_date, return_date=ret_date,
+        outbound_dates=out_dates, return_dates=ret_dates,
         adults=cfg.adults, currency=cfg.currency,
         max_fly_h=cfg.max_fly_duration_hours,
     )
-    print(f"  Duffel: {len(duffel_results)} résultats valides")
+    print(f"  Duffel: {len(duffel_results)} résultats ({nb_combos} combos dates)")
 
     # 3) Fusionner et garder le best par paire (origin, dest)
     all_results = ff_results + duffel_results
