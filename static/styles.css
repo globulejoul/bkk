@@ -18,8 +18,11 @@
 
 * { box-sizing: border-box; }
 
+html { overflow-x: hidden; }
+
 body {
   margin: 0;
+  overflow-x: hidden;
   background: radial-gradient(ellipse at top, #1a2030 0%, var(--bg) 50%);
   background-attachment: fixed;
   color: var(--text);
@@ -126,6 +129,7 @@ main {
   max-width: 1400px;
   margin: 0 auto;
   padding: 2rem;
+  width: 100%;
 }
 
 .tab { display: none; }
@@ -359,7 +363,17 @@ footer {
     align-items: flex-start;
     gap: 0.75rem;
   }
-  .status { width: 100%; justify-content: space-between; }
+  .status {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+  #last-run {
+    font-size: 0.7rem;
+    word-break: break-word;
+    flex: 1;
+    min-width: 0;
+  }
 
   main { padding: 0.75rem; }
 
@@ -381,25 +395,41 @@ footer {
     grid-template-columns: 1fr;
     gap: 0.75rem;
   }
-  .trip-card { padding: 1rem; }
+  .trip-card {
+    padding: 1rem;
+    overflow: hidden;
+  }
+  .trip-card .name { font-size: 1.1rem; }
+  .trip-card .dates { font-size: 0.65rem; word-break: break-all; }
   .trip-card .price-main { font-size: 2rem; }
-  .trip-card .price-stats { gap: 0.5rem; }
+  .trip-card .price-stats {
+    gap: 0.4rem 0.75rem;
+    font-size: 0.7rem;
+  }
+  .trip-card .threshold { font-size: 0.7rem; }
 
   .trip-selector select {
     width: 100%;
     min-width: unset;
+    font-size: 0.8rem;
   }
 
   .trip-detail { gap: 1rem; }
-  .trip-chart-wrap, .trip-breakdown { padding: 1rem; }
+  .trip-chart-wrap, .trip-breakdown {
+    padding: 0.75rem;
+    overflow: hidden;
+  }
   .trip-chart-wrap canvas { max-height: 250px; }
 
   table { font-size: 0.7rem; }
-  th, td { padding: 0.4rem 0.3rem; }
+  th, td { padding: 0.4rem 0.25rem; }
+  th { font-size: 0.6rem; }
 
   .alert-header { flex-direction: column; gap: 0.25rem; }
   .alert-header .price { font-size: 1.1rem; }
+  .alert-header .kind { font-size: 0.6rem; }
   .alert-card { padding: 0.75rem; }
+  .alert-meta { font-size: 0.65rem; word-break: break-word; }
 
   h2 { font-size: 1.25rem; }
 
@@ -410,4 +440,5 @@ footer {
   .logo h1 { font-size: 1.25rem; }
   .trip-card .price-main { font-size: 1.75rem; }
   .tabs button { padding: 0.5rem 0.6rem; font-size: 0.75rem; }
+  .trip-card .price-stats { font-size: 0.65rem; }
 }
