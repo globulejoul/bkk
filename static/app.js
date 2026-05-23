@@ -25,22 +25,44 @@ $$('.tabs button').forEach(b => {
 // ── Run-now button ──────────────────────────────────
 
 $('#run-now').addEventListener('click', async () => {
-  $('#run-now').disabled = true;
-  $('#run-now').textContent = '⏳ En cours…';
-  try {
-    const r = await fetch('/api/run-now', { method: 'POST' });
-    if (r.status === 409) {
-      alert('Un check est déjà en cours.');
-    } else {
-      // Poll for completion
-      setTimeout(loadOverview, 30000);
-    }
-  } finally {
-    setTimeout(() => {
-      $('#run-now').disabled = false;
-      $('#run-now').textContent = '↻ Check';
-    }, 3000);
+  const btn = $('#run-now');
+  btn.disabled = true;
+  const r = await fetch('/api/run-now', { method: 'POST' });
+  if (r.status === 409) {
+    alert('Un check est déjà en cours.');
+    btn.disabled = false;
+    return;
   }
+  // Poll until the run finishes
+  let elapsed = 0;
+  const tick = () => {
+    elapsed += 5;
+    const min = Math.floor(elapsed / 60);
+    const sec = elapsed % 60;
+    btn.textContent = `⏳ ${min}:${String(sec).padStart(2, '0')}`;
+  };
+  tick();
+  const timer = setInterval(tick, 5000);
+
+  const poll = setInterval(async () => {
+    try {
+      const runs = await fetch('/api/runs?limit=1').then(r => r.json());
+      if (runs.length && runs[0].status !== 'running') {
+        clearInterval(poll);
+        clearInterval(timer);
+        const run = runs[0];
+        const dur = run.finished_at && run.started_at
+          ? Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000)
+          : elapsed;
+        btn.textContent = run.status === 'ok'
+          ? `✓ ${run.trips_checked} périodes, ${run.alerts_generated} alertes (${dur}s)`
+          : `✗ Erreur (${dur}s)`;
+        btn.disabled = false;
+        loadOverview();
+        setTimeout(() => { btn.textContent = '↻ Check'; }, 8000);
+      }
+    } catch(e) { /* ignore poll errors */ }
+  }, 5000);
 });
 
 // ── Overview ────────────────────────────────────────
