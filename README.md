@@ -1,8 +1,8 @@
 # ✈️ Flight Watcher v4 — Lyon/Paris → Thaïlande
 
-Surveillance auto-hébergée des prix vols **Lyon/Paris → Bangkok/Phuket/Chiang Mai/Krabi/DMK** pendant les vacances scolaires Zone A (Lyon).
+Surveillance auto-hébergée des prix vols **CDG/LYS/BSL/GVA → BKK/HKT/CNX** pendant les vacances scolaires Zone A (Lyon).
 
-Stack : Docker Compose · Python · FastAPI · SQLite · Gluetun (NordVPN sidecar) · ntfy.
+Stack : Docker Compose · Python · FastAPI · SQLite · fli (Google Flights) · Duffel API · ntfy.
 
 ## Nouveautés v4
 

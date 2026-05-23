@@ -1,19 +1,19 @@
 :root {
-  /* Bangkok palette — temple gold, tuk-tuk teal, night market warm */
-  --bg: #1a1410;
-  --bg-elev: #231d16;
-  --bg-card: #2b2219;
-  --border: #3d3225;
-  --text: #f0e8db;
-  --text-dim: #b0a08a;
-  --text-faint: #7a6b58;
-  --gold: #e4a42e;
-  --gold-glow: #e4a42e22;
-  --teal: #01b6c5;
-  --teal-dim: #02726b;
-  --rose: #e50211;
-  --green: #7abcc4;
-  --saffron: #fec825;
+  /* Bangkok palette — light theme, temple gold accents */
+  --bg: #e7e9f1;
+  --bg-elev: #dddfe8;
+  --bg-card: #ffffff;
+  --border: #c8cad4;
+  --text: #1a1410;
+  --text-dim: #5a5347;
+  --text-faint: #8a8378;
+  --gold: #c4880a;
+  --gold-glow: #e4a42e18;
+  --teal: #02726b;
+  --teal-dim: #015c56;
+  --rose: #c5030f;
+  --green: #02726b;
+  --saffron: #d9a310;
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   --serif: 'Instrument Serif', 'Times New Roman', Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -26,7 +26,7 @@ html { overflow-x: hidden; }
 body {
   margin: 0;
   overflow-x: hidden;
-  background: radial-gradient(ellipse at top, #2a1f14 0%, var(--bg) 50%);
+  background: var(--bg);
   background-attachment: fixed;
   color: var(--text);
   font-family: var(--sans);
@@ -160,10 +160,12 @@ h2 {
   border-radius: 8px;
   padding: 1.5rem;
   position: relative;
-  transition: border-color 0.15s, transform 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 .trip-card:hover {
   border-color: var(--gold);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
   cursor: pointer;
 }
 .trip-card.no-data { opacity: 0.6; }
@@ -254,6 +256,7 @@ h2 {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 .trip-chart-wrap canvas {
   max-height: 360px;
@@ -264,6 +267,7 @@ h2 {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 
 /* ── Tables ─────────────────────────────────────────── */

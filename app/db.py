@@ -179,9 +179,19 @@ def get_state(c: sqlite3.Connection, trip: str) -> dict[str, Any] | None:
     return d
 
 
+_VALID_STATE_COLS = frozenset({
+    "lowest_price_eur", "lowest_seen_date", "lowest_origin",
+    "lowest_destination", "lowest_booking_url", "rolling_json",
+    "last_check_at",
+})
+
+
 def upsert_state(c: sqlite3.Connection, trip: str, **kwargs) -> None:
     if "rolling" in kwargs:
         kwargs["rolling_json"] = json.dumps(kwargs.pop("rolling"))
+    bad = set(kwargs.keys()) - _VALID_STATE_COLS
+    if bad:
+        raise ValueError(f"Invalid state columns: {bad}")
     current = c.execute("SELECT 1 FROM state WHERE trip_name=?", (trip,)).fetchone()
     if current:
         sets = ", ".join(f"{k}=:{k}" for k in kwargs)

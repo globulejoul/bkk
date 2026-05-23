@@ -5,6 +5,10 @@ const $$ = (s) => document.querySelectorAll(s);
 const fmt = new Intl.NumberFormat('fr-FR');
 const dateFmt = (s) => s ? new Date(s).toLocaleDateString('fr-FR') : '—';
 const dateTimeFmt = (s) => s ? new Date(s).toLocaleString('fr-FR') : '—';
+const esc = (s) => {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+};
 
 let tripChart = null;
 
@@ -118,7 +122,7 @@ function buildTripCard(t) {
   }
 
   card.innerHTML = `
-    <div class="name">${t.trip_name}</div>
+    <div class="name">${esc(t.trip_name)}</div>
     <div class="dates">${dates}</div>
     <div class="price-main ${priceClass}">
       ${priceTxt}${t.current_best != null ? '<span class="currency">€</span>' : ''}
@@ -162,8 +166,8 @@ async function loadTripDetail() {
   const datasets = [{
     label: 'Prix min (€)',
     data: history.map(p => ({ x: p.check_date, y: p.price_eur, meta: p })),
-    borderColor: '#e4a42e',
-    backgroundColor: '#e4a42e22',
+    borderColor: '#c4880a',
+    backgroundColor: '#c4880a18',
     fill: true,
     tension: 0.3,
     pointRadius: 3,
@@ -173,7 +177,7 @@ async function loadTripDetail() {
     datasets.push({
       label: 'Seuil',
       data: history.map(p => ({ x: p.check_date, y: tConf.threshold })),
-      borderColor: '#7abcc4',
+      borderColor: '#02726b',
       borderDash: [6, 4],
       pointRadius: 0,
       fill: false,
@@ -186,7 +190,7 @@ async function loadTripDetail() {
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { labels: { color: '#f0e8db', font: { family: 'JetBrains Mono' } } },
+        legend: { labels: { color: '#5a5347', font: { family: 'JetBrains Mono' } } },
         tooltip: {
           callbacks: {
             label: (item) => {
@@ -203,11 +207,11 @@ async function loadTripDetail() {
       },
       scales: {
         x: { type: 'time', time: { unit: 'day' },
-             ticks: { color: '#b0a08a', font: { family: 'JetBrains Mono' } },
-             grid: { color: '#3d3225' } },
-        y: { ticks: { color: '#b0a08a', font: { family: 'JetBrains Mono' },
+             ticks: { color: '#8a8378', font: { family: 'JetBrains Mono' } },
+             grid: { color: '#c8cad4' } },
+        y: { ticks: { color: '#8a8378', font: { family: 'JetBrains Mono' },
                       callback: v => v + '€' },
-             grid: { color: '#3d3225' } },
+             grid: { color: '#c8cad4' } },
       },
     },
   });
@@ -219,10 +223,10 @@ async function loadTripDetail() {
     const tr = document.createElement('tr');
     if (i === 0) tr.classList.add('best-row');
     tr.innerHTML = `
-      <td>${b.origin}</td>
-      <td>${b.destination}</td>
+      <td>${esc(b.origin)}</td>
+      <td>${esc(b.destination)}</td>
       <td class="price-cell">${Math.round(b.best_eur)}€</td>
-      <td>${b.airlines || '—'}</td>
+      <td>${esc(b.airlines) || '—'}</td>
       <td>${dateFmt(b.last_seen)}</td>
     `;
     tbody.appendChild(tr);
@@ -255,13 +259,13 @@ async function loadAlerts() {
       <div class="alert-header">
         <div>
           <div class="kind">${kindLabel} • ${dateTimeFmt(a.sent_at)}</div>
-          <div class="trip-name">${a.trip_name}</div>
+          <div class="trip-name">${esc(a.trip_name)}</div>
         </div>
         <div class="price">${Math.round(a.price_eur)}€</div>
       </div>
       <div class="alert-meta">
-        ${p.airlines || ''} • ${p.origin || '?'} → ${p.destination || '?'}
-        ${p.outbound_date ? '• ' + p.outbound_date + ' → ' + p.return_date : ''}
+        ${esc(p.airlines) || ''} • ${esc(p.origin) || '?'} → ${esc(p.destination) || '?'}
+        ${p.outbound_date ? '• ' + esc(p.outbound_date) + ' → ' + esc(p.return_date) : ''}
       </div>
     `;
     list.appendChild(card);
@@ -287,7 +291,7 @@ async function loadRuns() {
         <td style="color:${statusColor}">${r.status}</td>
         <td>${r.trips_checked ?? '—'}</td>
         <td>${r.alerts_generated ?? '—'}</td>
-        <td class="dim">${r.error || ''}</td>
+        <td class="dim">${esc(r.error) || ''}</td>
       </tr>
     `;
   });
