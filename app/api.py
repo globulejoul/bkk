@@ -148,6 +148,25 @@ async def run_now():
     return {"status": "started"}
 
 
+@app.get("/api/fx-history")
+async def fx_history(months: int = 6):
+    """EUR/THB history proxied to avoid CORS."""
+    import requests as req
+    from datetime import datetime, timedelta
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=months * 30)).strftime("%Y-%m-%d")
+    try:
+        r = req.get(f"https://api.frankfurter.app/{start}..{end}",
+                    params={"from": "EUR", "to": "THB"}, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        rates = data.get("rates", {})
+        dates = sorted(rates.keys())
+        return {"dates": dates, "rates": [rates[d]["THB"] for d in dates]}
+    except Exception:
+        return JSONResponse({"error": "FX fetch failed"}, status_code=502)
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}

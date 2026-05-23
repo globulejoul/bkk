@@ -326,24 +326,31 @@ async function loadWeather() {
       <div>Bangkok maintenant</div>
     `;
 
+    const labels = (daily.time || []).map(d => new Date(d).toLocaleDateString('fr-FR', {weekday: 'short', day: 'numeric'}));
     const ctx = $('#weather-chart').getContext('2d');
     if (weatherChart) weatherChart.destroy();
     weatherChart = new Chart(ctx, {
-      type: 'bar',
+      type: 'line',
       data: {
-        labels: (daily.time || []).map(d => new Date(d).toLocaleDateString('fr-FR', {weekday: 'short', day: 'numeric'})),
+        labels,
         datasets: [
           {
             label: 'Max °C',
             data: daily.temperature_2m_max || [],
-            backgroundColor: '#d35b17aa',
-            borderRadius: 4,
+            borderColor: '#d35b17',
+            backgroundColor: '#d35b1718',
+            fill: true,
+            tension: 0.4,
+            pointRadius: 3,
           },
           {
             label: 'Min °C',
             data: daily.temperature_2m_min || [],
-            backgroundColor: '#00714caa',
-            borderRadius: 4,
+            borderColor: '#00714c',
+            backgroundColor: '#00714c18',
+            fill: true,
+            tension: 0.4,
+            pointRadius: 3,
           },
         ],
       },
@@ -375,14 +382,11 @@ function weatherIcon(code) {
 
 async function loadFx() {
   try {
-    const end = new Date().toISOString().slice(0, 10);
-    const start = new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10);
-    const r = await fetch(
-      `https://api.frankfurter.app/${start}..${end}?from=EUR&to=THB`
-    );
+    const r = await fetch('/api/fx-history?months=6');
     const data = await r.json();
-    const dates = Object.keys(data.rates).sort();
-    const rates = dates.map(d => data.rates[d].THB);
+    if (data.error) throw new Error(data.error);
+    const dates = data.dates;
+    const rates = data.rates;
     const latest = rates[rates.length - 1];
     const oldest = rates[0];
     const diff = ((latest / oldest - 1) * 100).toFixed(1);
