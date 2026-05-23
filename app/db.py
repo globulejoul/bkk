@@ -225,6 +225,29 @@ def finish_run(c: sqlite3.Connection, run_id: int, status: str,
     )
 
 
+# ── Analytics ────────────────────────────────────────────────────
+
+def percentile_rank(c: sqlite3.Connection, trip: str,
+                    price_eur: float) -> float | None:
+    """Return the percentile rank (0-100) of price_eur in the trip's history.
+    0 = cheapest ever, 100 = most expensive ever.
+    Returns None if fewer than 5 historical data points."""
+    rows = c.execute("""
+        SELECT DISTINCT price_eur FROM checks
+        WHERE trip_name = ? AND price_eur IS NOT NULL
+          AND source NOT LIKE '%_th'
+        ORDER BY price_eur
+    """, (trip,)).fetchall()
+    prices = [r[0] for r in rows]
+    if len(prices) < 5:
+        return None
+    below = sum(1 for p in prices if p < price_eur)
+    equal = sum(1 for p in prices if p == price_eur)
+    # Percentile rank formula: (below + 0.5 * equal) / total * 100
+    rank = (below + 0.5 * equal) / len(prices) * 100
+    return round(rank, 1)
+
+
 # ── Queries for the API ──────────────────────────────────────────
 
 def trips_summary(c: sqlite3.Connection) -> list[dict]:

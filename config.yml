@@ -13,8 +13,6 @@ destinations: [BKK, DMK, HKT, CNX, KBV]
 
 # Devise principale (ce que tu paies au final depuis la France)
 currency: EUR
-# Devises additionnelles à interroger côté Tequila (révèle la marge FX Kiwi)
-currencies: [EUR, THB]
 
 adults: 1
 max_fly_duration_hours: 18

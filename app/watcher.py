@@ -1,6 +1,7 @@
 """Main check loop: queries sources, detects alerts, persists, notifies."""
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -16,9 +17,7 @@ def run_once(cfg: Config) -> dict[str, Any]:
 
     summary = {"trips_checked": 0, "alerts_generated": 0, "errors": []}
     try:
-        # FX rates needed
-        needed = set(cfg.currencies) | {"THB"}
-        rates = fx.fetch_rates(cfg.currency, list(needed))
+        rates = fx.fetch_rates(cfg.currency, ["THB"])
 
         for trip in cfg.trips:
             try:
@@ -27,6 +26,7 @@ def run_once(cfg: Config) -> dict[str, Any]:
                 summary["trips_checked"] += 1
             except Exception as e:
                 summary["errors"].append(f"{trip.name}: {e}")
+                print(f"  ❌ {trip.name}: {e}")
 
         with db.conn() as c:
             db.finish_run(c, run_id, "ok", summary["trips_checked"],
@@ -41,54 +41,75 @@ def run_once(cfg: Config) -> dict[str, Any]:
 
 
 def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
-    """Check one trip across all currencies/markets. Returns alert count."""
+    """Check one trip. Returns alert count."""
     today = date.today().isoformat()
     now = datetime.now().isoformat()
-    captured_at = now
 
-    # 1) Tequila in primary currency (EUR)
-    primary_flights = sources.search_tequila(
+    # Date médiane de chaque fenêtre pour la recherche
+    out_date = sources.mid_date(trip.outbound_window)
+    ret_date = sources.mid_date(trip.return_window)
+
+    # 1) fast-flights : source primaire (toutes les paires origin×dest)
+    print(f"\n→ {trip.name}: fast-flights {out_date} / {ret_date}")
+    ff_results = sources.search_fast_flights_multi(
         origins=cfg.origins, destinations=cfg.destinations,
-        outbound_window=trip.outbound_window,
-        return_window=trip.return_window,
-        currency=cfg.currency, adults=cfg.adults,
-        max_fly_duration_h=cfg.max_fly_duration_hours,
-        min_nights=trip.min_nights, max_nights=trip.max_nights,
+        outbound_date=out_date, return_date=ret_date,
+        adults=cfg.adults, max_fly_h=cfg.max_fly_duration_hours,
     )
-    valid = _filter_duration(primary_flights, cfg.max_fly_duration_hours)
-    print(f"\n→ {trip.name}: {len(valid)} valid Tequila results")
-    if not valid:
+    print(f"  fast-flights: {len(ff_results)} résultats valides")
+
+    # 2) Duffel : source compagnies directes (même dates)
+    duffel_results = sources.search_duffel(
+        origins=cfg.origins, destinations=cfg.destinations,
+        outbound_date=out_date, return_date=ret_date,
+        adults=cfg.adults, currency=cfg.currency,
+        max_fly_h=cfg.max_fly_duration_hours,
+    )
+    print(f"  Duffel: {len(duffel_results)} résultats valides")
+
+    # 3) Fusionner et garder le best par paire (origin, dest)
+    all_results = ff_results + duffel_results
+    if not all_results:
+        print(f"  ⚠ Aucun résultat pour {trip.name}")
         return 0
 
-    best = min(valid, key=lambda f: f["price"])
-    parsed_best = sources.tequila_parse(best)
-    best_price_eur = parsed_best["price"]
+    by_pair: dict[tuple[str, str], sources.FlightResult] = {}
+    for r in all_results:
+        key = (r.origin, r.destination)
+        price_eur = _to_eur(r, rates)
+        if price_eur is None:
+            continue
+        existing = by_pair.get(key)
+        if existing is None or price_eur < (_to_eur(existing, rates) or 1e9):
+            by_pair[key] = r
 
-    # 2) Persist per-(origin, dest) results for the breakdown view
+    if not by_pair:
+        print(f"  ⚠ Aucun prix convertible pour {trip.name}")
+        return 0
+
+    # Best overall
+    best = min(by_pair.values(), key=lambda r: _to_eur(r, rates) or 1e9)
+    best_price_eur = _to_eur(best, rates)
+
+    # 4) Persist tous les résultats par paire
     with db.conn() as c:
-        # Best per (origin, destination) for this run
-        by_pair: dict[tuple[str, str], dict] = {}
-        for f in valid:
-            p = sources.tequila_parse(f)
-            key = (p["origin"], p["destination"])
-            if key not in by_pair or p["price"] < by_pair[key]["price"]:
-                by_pair[key] = p
-        for p in by_pair.values():
+        for r in by_pair.values():
+            price_eur_val = _to_eur(r, rates)
             db.insert_check(c, {
                 "check_date": today, "trip_name": trip.name,
-                "source": "tequila_eur",
-                "origin": p["origin"], "destination": p["destination"],
-                "price_local": p["price"], "currency": cfg.currency,
-                "price_eur": p["price"],
-                "outbound_date": p["outbound_date"],
-                "return_date": p["return_date"],
-                "out_h": p["out_h"], "ret_h": p["ret_h"],
-                "out_stops": p["out_stops"], "ret_stops": p["ret_stops"],
-                "airlines": p["airlines"], "booking_url": p["booking_url"],
-                "captured_at": captured_at,
+                "source": r.source,
+                "origin": r.origin, "destination": r.destination,
+                "price_local": r.price, "currency": r.currency,
+                "price_eur": price_eur_val,
+                "outbound_date": r.outbound_date,
+                "return_date": r.return_date,
+                "out_h": r.out_h, "ret_h": r.ret_h,
+                "out_stops": r.out_stops, "ret_stops": r.ret_stops,
+                "airlines": r.airlines, "booking_url": r.booking_url,
+                "captured_at": now,
             })
 
-        # 3) State update / alert detection
+        # 5) State update / alert detection
         state = db.get_state(c, trip.name) or {}
         prev_low = state.get("lowest_price_eur")
         rolling = state.get("rolling") or []
@@ -115,152 +136,207 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
                         "delta_eur": best_price_eur - recent_low}
 
         # Persist state
-        update = {"rolling": rolling, "last_check_at": now}
+        update: dict[str, Any] = {"rolling": rolling, "last_check_at": now}
         if new_low or prev_low is None:
             update.update({
                 "lowest_price_eur": best_price_eur,
                 "lowest_seen_date": today,
-                "lowest_origin": parsed_best["origin"],
-                "lowest_destination": parsed_best["destination"],
-                "lowest_booking_url": parsed_best["booking_url"],
+                "lowest_origin": best.origin,
+                "lowest_destination": best.destination,
+                "lowest_booking_url": best.booking_url,
             })
         db.upsert_state(c, trip.name, **update)
 
     alert_count = 0
 
-    # 4) On alerts only: run secondary Tequila currency + fast-flights cross-checks
-    if new_low or hit_threshold or rise:
-        cross_checks = _build_cross_checks(cfg, trip, parsed_best, rates)
-        # Persist cross-check rows too
+    # 6) Percentile rank
+    pct = None
+    with db.conn() as c:
+        pct = db.percentile_rank(c, trip.name, best_price_eur)
+    if pct is not None:
+        print(f"  Percentile: {pct:.0f}e (0=cheapest)")
+
+    # Alerte percentile : prix dans le 10e percentile historique
+    in_low_percentile = pct is not None and pct <= 10.0
+
+    # 7) On alerts: cross-check VPN + comparaison RT vs 2 one-ways
+    should_alert = new_low or hit_threshold or rise or in_low_percentile
+    if should_alert:
+        cross_checks = _build_cross_checks(cfg, best, rates)
+        ow_comparison = _compare_oneway(cfg, best, rates)
+
         with db.conn() as c:
             for cc in cross_checks:
                 db.insert_check(c, {
                     "check_date": today, "trip_name": trip.name,
                     "source": cc["source"],
-                    "origin": parsed_best["origin"],
-                    "destination": parsed_best["destination"],
-                    "price_local": cc["price"],
-                    "currency": cc["currency"],
+                    "origin": best.origin, "destination": best.destination,
+                    "price_local": cc["price"], "currency": cc["currency"],
                     "price_eur": cc.get("eur_equiv"),
-                    "outbound_date": parsed_best["outbound_date"],
-                    "return_date": parsed_best["return_date"],
-                    "out_h": parsed_best["out_h"],
-                    "ret_h": parsed_best["ret_h"],
-                    "out_stops": parsed_best["out_stops"],
-                    "ret_stops": parsed_best["ret_stops"],
+                    "outbound_date": best.outbound_date,
+                    "return_date": best.return_date,
+                    "out_h": best.out_h, "ret_h": best.ret_h,
+                    "out_stops": best.out_stops, "ret_stops": best.ret_stops,
                     "airlines": cc.get("airlines", ""),
-                    "booking_url": "",
-                    "captured_at": captured_at,
+                    "booking_url": "", "captured_at": now,
                 })
 
-        if new_low or hit_threshold:
+        # Determine alert kind
+        if new_low or hit_threshold or in_low_percentile:
+            kind = "new_low"
             payload = {
-                "kind": "new_low", "trip": trip.name,
+                "kind": kind, "trip": trip.name,
                 "price": best_price_eur,
                 "previous_low": prev_low,
                 "hit_threshold": hit_threshold,
-                **parsed_best,
+                "percentile": pct,
+                "origin": best.origin, "destination": best.destination,
+                "outbound_date": best.outbound_date,
+                "return_date": best.return_date,
+                "out_h": best.out_h, "ret_h": best.ret_h,
+                "out_stops": best.out_stops, "ret_stops": best.ret_stops,
+                "airlines": best.airlines,
+                "booking_url": best.booking_url,
                 "cross_checks": cross_checks,
+                "oneway_comparison": ow_comparison,
             }
             notify.send_ntfy(cfg, payload)
             with db.conn() as c:
-                db.log_alert(c, trip.name, "new_low",
-                             best_price_eur, payload)
+                db.log_alert(c, trip.name, kind, best_price_eur, payload)
             alert_count += 1
-            print(f"  ⚠️  new_low alert sent")
+            print(f"  ⚠️  {kind} alert sent ({best_price_eur:.0f}€)")
         elif rise:
-            payload = {"kind": "rise", "trip": trip.name,
-                       "price": best_price_eur, **rise, **parsed_best}
+            payload = {
+                "kind": "rise", "trip": trip.name,
+                "price": best_price_eur, **rise,
+                "percentile": pct,
+                "origin": best.origin, "destination": best.destination,
+                "outbound_date": best.outbound_date,
+                "return_date": best.return_date,
+                "out_h": best.out_h, "ret_h": best.ret_h,
+                "out_stops": best.out_stops, "ret_stops": best.ret_stops,
+                "airlines": best.airlines,
+                "booking_url": best.booking_url,
+            }
             notify.send_ntfy(cfg, payload)
             with db.conn() as c:
                 db.log_alert(c, trip.name, "rise", best_price_eur, payload)
             alert_count += 1
-            print(f"  📈 rise alert sent")
+            print(f"  📈 rise alert sent ({best_price_eur:.0f}€)")
 
     return alert_count
 
 
-def _filter_duration(flights: list[dict], max_h: int) -> list[dict]:
-    out = []
-    for f in flights:
-        d = f.get("duration", {})
-        oh = d.get("departure", 0) / 3600
-        rh = d.get("return", 0) / 3600
-        if oh <= max_h and rh <= max_h:
-            out.append(f)
-    return out
+def _to_eur(r: sources.FlightResult, rates: dict[str, float]) -> float | None:
+    """Convert a FlightResult price to EUR."""
+    if r.price is None:
+        return None
+    if r.currency == "EUR":
+        return r.price
+    return fx.to_eur(r.price, r.currency, rates)
 
 
-def _build_cross_checks(cfg: Config, trip, parsed_best: dict,
+def _compare_oneway(cfg: Config, best: sources.FlightResult,
+                    rates: dict[str, float]) -> dict | None:
+    """Compare round-trip price vs 2 separate one-ways.
+    Returns comparison dict or None if one-ways aren't available."""
+    rt_eur = _to_eur(best, rates)
+    if rt_eur is None:
+        return None
+
+    print(f"  Comparaison RT vs 2 OW pour {best.origin}→{best.destination}...")
+
+    # One-way outbound (best origin → best destination)
+    ow_out = None
+    # Try fast-flights first
+    ff_out = sources.search_fast_flights_oneway(
+        origin=best.origin, destination=best.destination,
+        dep_date=best.outbound_date, adults=cfg.adults,
+        label=f"OW {best.origin}→{best.destination}",
+    )
+    if ff_out.price is not None:
+        ow_out = ff_out
+
+    time.sleep(2.0)
+
+    # Try Duffel
+    duf_out = sources.search_duffel_oneway(
+        origin=best.origin, destination=best.destination,
+        dep_date=best.outbound_date, adults=cfg.adults,
+        currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
+    )
+    if duf_out and (ow_out is None or
+                    (_to_eur(duf_out, rates) or 1e9) < (_to_eur(ow_out, rates) or 1e9)):
+        ow_out = duf_out
+
+    time.sleep(2.0)
+
+    # One-way return (best destination → best origin)
+    ow_ret = None
+    ff_ret = sources.search_fast_flights_oneway(
+        origin=best.destination, destination=best.origin,
+        dep_date=best.return_date, adults=cfg.adults,
+        label=f"OW {best.destination}→{best.origin}",
+    )
+    if ff_ret.price is not None:
+        ow_ret = ff_ret
+
+    time.sleep(2.0)
+
+    duf_ret = sources.search_duffel_oneway(
+        origin=best.destination, destination=best.origin,
+        dep_date=best.return_date, adults=cfg.adults,
+        currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
+    )
+    if duf_ret and (ow_ret is None or
+                    (_to_eur(duf_ret, rates) or 1e9) < (_to_eur(ow_ret, rates) or 1e9)):
+        ow_ret = duf_ret
+
+    if ow_out is None or ow_ret is None:
+        print("  OW comparison: pas assez de données")
+        return None
+
+    out_eur = _to_eur(ow_out, rates)
+    ret_eur = _to_eur(ow_ret, rates)
+    if out_eur is None or ret_eur is None:
+        return None
+
+    total_ow = out_eur + ret_eur
+    saving = rt_eur - total_ow
+
+    result = {
+        "rt_price": rt_eur,
+        "ow_out_price": out_eur,
+        "ow_out_airlines": ow_out.airlines,
+        "ow_out_source": ow_out.source,
+        "ow_ret_price": ret_eur,
+        "ow_ret_airlines": ow_ret.airlines,
+        "ow_ret_source": ow_ret.source,
+        "ow_total": total_ow,
+        "saving": saving,
+    }
+    if saving > 0:
+        print(f"  2 OW = {total_ow:.0f}€ vs RT {rt_eur:.0f}€ → économie {saving:.0f}€")
+    else:
+        print(f"  2 OW = {total_ow:.0f}€ vs RT {rt_eur:.0f}€ → RT moins cher")
+    return result
+
+
+def _build_cross_checks(cfg: Config, best: sources.FlightResult,
                         rates: dict[str, float]) -> list[dict]:
-    """Tequila THB + fast-flights FR + fast-flights TH (via VPN)."""
+    """Cross-check via VPN TH (géo price discrimination)."""
     checks = []
 
-    # Tequila in other currencies
-    for cur in cfg.currencies:
-        if cur == cfg.currency:
-            continue
-        try:
-            alt = sources.search_tequila(
-                origins=cfg.origins, destinations=cfg.destinations,
-                outbound_window=trip.outbound_window,
-                return_window=trip.return_window,
-                currency=cur, adults=cfg.adults,
-                max_fly_duration_h=cfg.max_fly_duration_hours,
-                min_nights=trip.min_nights, max_nights=trip.max_nights,
-            )
-            valid_alt = _filter_duration(alt, cfg.max_fly_duration_hours)
-            if valid_alt:
-                alt_best = min(valid_alt, key=lambda f: f["price"])
-                eur_eq = fx.to_eur(alt_best["price"], cur, rates)
-                checks.append({
-                    "label": f"Kiwi {cur}",
-                    "source": f"tequila_{cur.lower()}",
-                    "price": alt_best["price"], "currency": cur,
-                    "eur_equiv": eur_eq,
-                    "airlines": "+".join(
-                        {seg.get("airline", "")
-                         for seg in alt_best.get("route", [])
-                         if seg.get("airline")}
-                    ),
-                })
-                print(f"  Kiwi {cur}: {alt_best['price']:.0f} ≈ "
-                      f"{eur_eq:.0f}€" if eur_eq else
-                      f"  Kiwi {cur}: {alt_best['price']:.0f}")
-        except Exception as e:
-            print(f"  Kiwi {cur} fail: {e}")
-
-    # fast-flights from France
-    try:
-        ff_fr = sources.search_fast_flights(
-            origin=parsed_best["origin"],
-            destination=parsed_best["destination"],
-            outbound_date=parsed_best["outbound_date"],
-            return_date=parsed_best["return_date"],
-            adults=cfg.adults, via_vpn=False, market_label="Google FR",
-        )
-        if ff_fr.price:
-            eur_eq = fx.to_eur(ff_fr.price, ff_fr.currency, rates)
-            checks.append({
-                "label": ff_fr.market_label,
-                "source": "fast_flights_fr",
-                "price": ff_fr.price, "currency": ff_fr.currency,
-                "eur_equiv": eur_eq, "airlines": ff_fr.airlines,
-            })
-            print(f"  Google FR: {ff_fr.price:.0f} {ff_fr.currency}")
-    except Exception as e:
-        print(f"  Google FR fail: {e}")
-
-    # fast-flights from Thailand (via VPN)
+    # fast-flights via VPN Thailand
     try:
         ff_th = sources.search_fast_flights(
-            origin=parsed_best["origin"],
-            destination=parsed_best["destination"],
-            outbound_date=parsed_best["outbound_date"],
-            return_date=parsed_best["return_date"],
-            adults=cfg.adults, via_vpn=True, market_label="Google TH (VPN)",
+            origin=best.origin, destination=best.destination,
+            outbound_date=best.outbound_date,
+            return_date=best.return_date,
+            adults=cfg.adults, via_vpn=True,
+            market_label="Google TH (VPN)",
         )
-        if ff_th.price:
+        if ff_th.price is not None:
             eur_eq = fx.to_eur(ff_th.price, ff_th.currency, rates)
             checks.append({
                 "label": ff_th.market_label,
@@ -268,8 +344,8 @@ def _build_cross_checks(cfg: Config, trip, parsed_best: dict,
                 "price": ff_th.price, "currency": ff_th.currency,
                 "eur_equiv": eur_eq, "airlines": ff_th.airlines,
             })
-            print(f"  Google TH: {ff_th.price:.0f} {ff_th.currency}")
+            print(f"  Google TH (VPN): {ff_th.price:.0f} {ff_th.currency}")
     except Exception as e:
-        print(f"  Google TH fail: {e}")
+        print(f"  Google TH (VPN) fail: {e}")
 
     return checks

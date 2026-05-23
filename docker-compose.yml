@@ -32,7 +32,7 @@ services:
     image: flight-watcher:latest
     container_name: flightwatch
     environment:
-      TEQUILA_API_KEY: ${TEQUILA_API_KEY}
+      DUFFEL_API_KEY: ${DUFFEL_API_KEY:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
       # Watcher talks to gluetun for VPN-routed Google Flights checks
       VPN_HTTP_PROXY: http://gluetun:8888
