@@ -7,8 +7,8 @@
 origins: [CDG, LYS, BSL, GVA]
 
 # Destinations Thaïlande
-# BKK Suvarnabhumi, HKT Phuket
-destinations: [BKK, HKT]
+# BKK Suvarnabhumi, HKT Phuket, CNX Chiang Mai
+destinations: [BKK, HKT, CNX]
 
 # Devise principale (ce que tu paies au final depuis la France)
 currency: EUR
