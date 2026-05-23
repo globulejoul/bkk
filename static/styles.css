@@ -343,12 +343,71 @@ footer {
   color: var(--text-faint);
 }
 
+/* ── Tables responsive ──────────────────────────────── */
+
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* ── Responsive ─────────────────────────────────────── */
 
 @media (max-width: 768px) {
-  header { padding: 1rem; flex-direction: column; align-items: flex-start; gap: 0.75rem; }
-  main { padding: 1rem; }
-  .tabs { padding: 0 1rem; }
-  .logo h1 { font-size: 1.75rem; }
+  header {
+    padding: 1rem;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+  .status { width: 100%; justify-content: space-between; }
+
+  main { padding: 0.75rem; }
+
+  .tabs {
+    padding: 0 0.5rem;
+    gap: 0;
+    -webkit-overflow-scrolling: touch;
+  }
+  .tabs button {
+    padding: 0.6rem 0.75rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .logo h1 { font-size: 1.5rem; }
+
+  #trips-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+  .trip-card { padding: 1rem; }
   .trip-card .price-main { font-size: 2rem; }
+  .trip-card .price-stats { gap: 0.5rem; }
+
+  .trip-selector select {
+    width: 100%;
+    min-width: unset;
+  }
+
+  .trip-detail { gap: 1rem; }
+  .trip-chart-wrap, .trip-breakdown { padding: 1rem; }
+  .trip-chart-wrap canvas { max-height: 250px; }
+
+  table { font-size: 0.7rem; }
+  th, td { padding: 0.4rem 0.3rem; }
+
+  .alert-header { flex-direction: column; gap: 0.25rem; }
+  .alert-header .price { font-size: 1.1rem; }
+  .alert-card { padding: 0.75rem; }
+
+  h2 { font-size: 1.25rem; }
+
+  footer { margin: 1.5rem auto 1rem; padding: 0.75rem 1rem; }
+}
+
+@media (max-width: 380px) {
+  .logo h1 { font-size: 1.25rem; }
+  .trip-card .price-main { font-size: 1.75rem; }
+  .tabs button { padding: 0.5rem 0.6rem; font-size: 0.75rem; }
 }
