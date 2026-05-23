@@ -166,8 +166,8 @@ async function loadTripDetail() {
   const datasets = [{
     label: 'Prix min (€)',
     data: history.map(p => ({ x: p.check_date, y: p.price_eur, meta: p })),
-    borderColor: '#c4880a',
-    backgroundColor: '#c4880a18',
+    borderColor: '#c2a25b',
+    backgroundColor: '#c2a25b18',
     fill: true,
     tension: 0.3,
     pointRadius: 3,
@@ -177,7 +177,7 @@ async function loadTripDetail() {
     datasets.push({
       label: 'Seuil',
       data: history.map(p => ({ x: p.check_date, y: tConf.threshold })),
-      borderColor: '#02726b',
+      borderColor: '#00714c',
       borderDash: [6, 4],
       pointRadius: 0,
       fill: false,
@@ -190,7 +190,7 @@ async function loadTripDetail() {
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { labels: { color: '#5a5347', font: { family: 'JetBrains Mono' } } },
+        legend: { labels: { color: '#464d2c', font: { family: 'JetBrains Mono' } } },
         tooltip: {
           callbacks: {
             label: (item) => {
@@ -207,11 +207,11 @@ async function loadTripDetail() {
       },
       scales: {
         x: { type: 'time', time: { unit: 'day' },
-             ticks: { color: '#8a8378', font: { family: 'JetBrains Mono' } },
-             grid: { color: '#c8cad4' } },
-        y: { ticks: { color: '#8a8378', font: { family: 'JetBrains Mono' },
+             ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono' } },
+             grid: { color: '#cfcdcb' } },
+        y: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono' },
                       callback: v => v + '€' },
-             grid: { color: '#c8cad4' } },
+             grid: { color: '#cfcdcb' } },
       },
     },
   });
@@ -283,7 +283,7 @@ async function loadRuns() {
       ? Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000) + 's'
       : (r.status === 'running' ? '…' : '—');
     const statusColor = r.status === 'ok' ? 'var(--teal)'
-      : r.status === 'error' ? 'var(--rose)' : 'var(--amber)';
+      : r.status === 'error' ? 'var(--rose)' : 'var(--gold)';
     tbody.innerHTML += `
       <tr>
         <td>${dateTimeFmt(r.started_at)}</td>

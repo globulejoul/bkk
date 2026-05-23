@@ -1,19 +1,18 @@
 :root {
-  /* Bangkok palette — light theme, temple gold accents */
+  /* Bangkok palette */
   --bg: #e7e9f1;
-  --bg-elev: #dddfe8;
+  --bg-elev: #dfe1e9;
   --bg-card: #ffffff;
-  --border: #c8cad4;
-  --text: #1a1410;
-  --text-dim: #5a5347;
-  --text-faint: #8a8378;
-  --gold: #c4880a;
-  --gold-glow: #e4a42e18;
-  --teal: #02726b;
-  --teal-dim: #015c56;
-  --rose: #c5030f;
-  --green: #02726b;
-  --saffron: #d9a310;
+  --border: #cfcdcb;
+  --text: #464d2c;
+  --text-dim: #a8a8a2;
+  --text-faint: #cfcdcb;
+  --gold: #c2a25b;
+  --gold-glow: #ffb94d22;
+  --teal: #005842;
+  --rose: #d35b17;
+  --green: #00714c;
+  --saffron: #ffb94d;
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   --serif: 'Instrument Serif', 'Times New Roman', Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
