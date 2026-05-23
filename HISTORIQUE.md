@@ -31,7 +31,7 @@ L'utilisateur avait déjà identifié **Algofly** mais le trouvait fastidieux : 
 - Python + Kiwi Tequila API (1 call par période grâce aux fenêtres de dates natives `dateFrom/dateTo` + `returnFrom/returnTo`)
 - GitHub Actions cron quotidien
 - Storage : commit `history.csv` + `lowest_prices.json` dans le repo
-- Notifications : ntfy.sh sur topic `frigate-maison-jfourt`
+- Notifications : ntfy.sh (topic configuré dans config.yml)
 - Détection : nouveau bas all-time + seuil par période
 
 **Pourquoi Kiwi Tequila comme primary** : c'est la seule API gratuite avec support natif des fenêtres de dates flexibles. Avec ±3 jours sur l'aller ET le retour, ça fait 49 combinaisons (7×7) — un seul call Tequila au lieu de 49.
@@ -97,7 +97,7 @@ Au passage, recherche sur les "mythes de pricing aérien" :
 
 L'utilisateur demande : VPS plus flexible que GitHub Actions ? Et de chercher sur GitHub/GitLab les projets utiles qu'on aurait ratés.
 
-**Constat important** : ntfy topic est `frigate-maison-jfourt` → l'utilisateur a déjà un **home server** qui tourne 24/7 (Frigate = NVR caméras self-hosted). Donc "VPS" = home server pour lui, coût marginal nul.
+**Constat important** : l'utilisateur a déjà un **home server** qui tourne 24/7 (Frigate = NVR caméras self-hosted). Donc "VPS" = home server pour lui, coût marginal nul.
 
 ### Verdict VPS vs GHA pour ce cas
 

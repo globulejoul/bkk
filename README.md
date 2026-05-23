@@ -98,7 +98,7 @@ docker compose exec watcher python -m app run
 
 ### 6. Abonnement ntfy
 
-Sur ton mobile : app ntfy → ajouter le topic `frigate-maison-jfourt` (serveur `https://ntfy.sh`).
+Sur ton mobile : app ntfy → ajouter le topic configuré dans `config.yml` (serveur `https://ntfy.sh`).
 
 ## Utilisation au quotidien
 

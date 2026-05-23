@@ -1,32 +1,5 @@
 services:
 
-  gluetun:
-    image: qmcgaw/gluetun:latest
-    container_name: flightwatch-vpn
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    environment:
-      VPN_SERVICE_PROVIDER: nordvpn
-      VPN_TYPE: openvpn
-      OPENVPN_USER: ${NORDVPN_USER}
-      OPENVPN_PASSWORD: ${NORDVPN_PASS}
-      SERVER_COUNTRIES: Thailand
-      # Built-in HTTP proxy on port 8888, used by the watcher for
-      # VPN-routed checks only (not for everything)
-      HTTPPROXY: "on"
-      HTTPPROXY_LOG: "off"
-      TZ: Europe/Paris
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "https://ipinfo.io/country"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    # No published ports — the proxy is consumed inside the compose network only
-
   watcher:
     build: .
     image: flight-watcher:latest
@@ -34,15 +7,10 @@ services:
     environment:
       DUFFEL_API_KEY: ${DUFFEL_API_KEY:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
-      # Watcher talks to gluetun for VPN-routed Google Flights checks
-      VPN_HTTP_PROXY: http://gluetun:8888
       TZ: Europe/Paris
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
     ports:
       - "127.0.0.1:8080:8080"
-    depends_on:
-      gluetun:
-        condition: service_healthy
     restart: unless-stopped

@@ -162,8 +162,8 @@ async function loadTripDetail() {
   const datasets = [{
     label: 'Prix min (€)',
     data: history.map(p => ({ x: p.check_date, y: p.price_eur, meta: p })),
-    borderColor: '#f59e0b',
-    backgroundColor: '#f59e0b22',
+    borderColor: '#e4a42e',
+    backgroundColor: '#e4a42e22',
     fill: true,
     tension: 0.3,
     pointRadius: 3,
@@ -173,7 +173,7 @@ async function loadTripDetail() {
     datasets.push({
       label: 'Seuil',
       data: history.map(p => ({ x: p.check_date, y: tConf.threshold })),
-      borderColor: '#22c55e',
+      borderColor: '#7abcc4',
       borderDash: [6, 4],
       pointRadius: 0,
       fill: false,
@@ -186,7 +186,7 @@ async function loadTripDetail() {
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { labels: { color: '#e8eef5', font: { family: 'JetBrains Mono' } } },
+        legend: { labels: { color: '#f0e8db', font: { family: 'JetBrains Mono' } } },
         tooltip: {
           callbacks: {
             label: (item) => {
@@ -203,11 +203,11 @@ async function loadTripDetail() {
       },
       scales: {
         x: { type: 'time', time: { unit: 'day' },
-             ticks: { color: '#8b9aab', font: { family: 'JetBrains Mono' } },
-             grid: { color: '#2a3441' } },
-        y: { ticks: { color: '#8b9aab', font: { family: 'JetBrains Mono' },
+             ticks: { color: '#b0a08a', font: { family: 'JetBrains Mono' } },
+             grid: { color: '#3d3225' } },
+        y: { ticks: { color: '#b0a08a', font: { family: 'JetBrains Mono' },
                       callback: v => v + '€' },
-             grid: { color: '#2a3441' } },
+             grid: { color: '#3d3225' } },
       },
     },
   });
@@ -278,7 +278,7 @@ async function loadRuns() {
     const dur = r.finished_at && r.started_at
       ? Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000) + 's'
       : (r.status === 'running' ? '…' : '—');
-    const statusColor = r.status === 'ok' ? 'var(--green)'
+    const statusColor = r.status === 'ok' ? 'var(--teal)'
       : r.status === 'error' ? 'var(--rose)' : 'var(--amber)';
     tbody.innerHTML += `
       <tr>
