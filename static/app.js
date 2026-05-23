@@ -29,25 +29,19 @@ $$('.tabs button').forEach(b => {
 
 // ── Run-now button ──────────────────────────────────
 
-$('#run-now').addEventListener('click', async () => {
+function startPolling(startedAt) {
   const btn = $('#run-now');
   btn.disabled = true;
-  const r = await fetch('/api/run-now', { method: 'POST' });
-  if (r.status === 409) {
-    alert('Un check est déjà en cours.');
-    btn.disabled = false;
-    return;
-  }
-  // Poll until the run finishes
-  let elapsed = 0;
+
+  const t0 = startedAt ? new Date(startedAt).getTime() : Date.now();
   const tick = () => {
-    elapsed += 5;
+    const elapsed = Math.round((Date.now() - t0) / 1000);
     const min = Math.floor(elapsed / 60);
     const sec = elapsed % 60;
     btn.textContent = `⏳ ${min}:${String(sec).padStart(2, '0')}`;
   };
   tick();
-  const timer = setInterval(tick, 5000);
+  const timer = setInterval(tick, 1000);
 
   const poll = setInterval(async () => {
     try {
@@ -58,7 +52,7 @@ $('#run-now').addEventListener('click', async () => {
         const run = runs[0];
         const dur = run.finished_at && run.started_at
           ? Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000)
-          : elapsed;
+          : Math.round((Date.now() - t0) / 1000);
         btn.textContent = run.status === 'ok'
           ? `✓ ${run.trips_checked} périodes, ${run.alerts_generated} alertes (${dur}s)`
           : `✗ Erreur (${dur}s)`;
@@ -68,6 +62,27 @@ $('#run-now').addEventListener('click', async () => {
       }
     } catch(e) { /* ignore poll errors */ }
   }, 5000);
+}
+
+async function checkRunningState() {
+  try {
+    const runs = await fetch('/api/runs?limit=1').then(r => r.json());
+    if (runs.length && runs[0].status === 'running') {
+      startPolling(runs[0].started_at);
+    }
+  } catch(e) {}
+}
+
+$('#run-now').addEventListener('click', async () => {
+  const btn = $('#run-now');
+  btn.disabled = true;
+  const r = await fetch('/api/run-now', { method: 'POST' });
+  if (r.status === 409) {
+    alert('Un check est déjà en cours.');
+    startPolling(null);
+    return;
+  }
+  startPolling(null);
 });
 
 // ── Overview ────────────────────────────────────────
@@ -450,6 +465,7 @@ async function loadFx() {
 
 loadOverview();
 loadIntro();
+checkRunningState();
 setInterval(loadOverview, 60000);
 
 async function loadIntro() {
