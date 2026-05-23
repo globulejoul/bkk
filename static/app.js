@@ -470,12 +470,18 @@ setInterval(loadOverview, 60000);
 
 async function loadIntro() {
   try {
-    const cfg = await fetch('/api/config-summary').then(r => r.json());
+    const [cfg, trips] = await Promise.all([
+      fetch('/api/config-summary').then(r => r.json()),
+      fetch('/api/trips').then(r => r.json()),
+    ]);
     const cron = parseCron(cfg.schedule_cron);
     const pax = cfg.adults === 1 ? '1 personne' : cfg.adults + ' personnes';
+    const nbPeriodes = trips.length;
     $('#intro').textContent =
       `Check auto ${cron} pour ${pax} · ` +
+      `${nbPeriodes} périodes vacances Zone A · ` +
       `Départs ${cfg.origins.join(', ')} → ${cfg.destinations.join(', ')} · ` +
+      `Dates ±3j autour des vacances · ` +
       `Vols < ${cfg.max_fly_duration_hours}h`;
   } catch(e) {}
 }
