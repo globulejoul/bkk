@@ -1,0 +1,10 @@
+.env
+CLAUDE.md
+.claude/
+data/
+__pycache__/
+*.pyc
+.DS_Store
+*.db
+*.db-wal
+*.db-shm

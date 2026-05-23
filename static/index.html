@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>✈ Bangkok Watch</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header>
+  <div class="logo">
+    <span class="plane">✈</span>
+    <h1>Bangkok <em>Watch</em></h1>
+  </div>
+  <div class="status">
+    <span id="last-run" class="dim">…</span>
+    <button id="run-now" title="Lancer un check immédiatement">↻ Check</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button data-tab="overview" class="active">Vue d'ensemble</button>
+  <button data-tab="trip">Détail période</button>
+  <button data-tab="alerts">Alertes</button>
+  <button data-tab="runs">Logs</button>
+</nav>
+
+<main>
+  <!-- OVERVIEW -->
+  <section id="tab-overview" class="tab active">
+    <div id="trips-grid"></div>
+  </section>
+
+  <!-- TRIP DETAIL -->
+  <section id="tab-trip" class="tab">
+    <div class="trip-selector">
+      <label>Période :</label>
+      <select id="trip-select"></select>
+    </div>
+    <div class="trip-detail">
+      <div class="trip-chart-wrap">
+        <h2>Évolution</h2>
+        <canvas id="trip-chart"></canvas>
+      </div>
+      <div class="trip-breakdown">
+        <h2>Par combinaison <span class="dim">(30 derniers jours)</span></h2>
+        <table id="breakdown-table">
+          <thead>
+            <tr><th>Origine</th><th>Destination</th><th>Meilleur prix</th>
+                <th>Compagnies</th><th>Vu le</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ALERTS -->
+  <section id="tab-alerts" class="tab">
+    <h2>Dernières alertes</h2>
+    <div id="alerts-list"></div>
+  </section>
+
+  <!-- RUNS -->
+  <section id="tab-runs" class="tab">
+    <h2>Derniers runs</h2>
+    <table id="runs-table">
+      <thead>
+        <tr><th>Démarré</th><th>Durée</th><th>Statut</th>
+            <th>Périodes</th><th>Alertes</th><th>Erreur</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<footer>
+  <span>flight-watcher v4 • <a href="https://github.com" target="_blank">source</a></span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
