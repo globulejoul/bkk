@@ -20,7 +20,7 @@ max_fly_duration_hours: 18
 # "0 7,19 * * *" = 2x par jour à 7h et 19h
 # "0 */6 * * *" = toutes les 6 heures
 # "0 * * * *"   = toutes les heures (max ~700 calls/mois Tequila)
-schedule_cron: "0 7,19 * * *"
+schedule_cron: "0 7,12,19 * * *"
 
 rolling_window_days: 14
 rise_threshold_pct: 0.10  # alerte hausse si +10% vs bas 7 derniers jours

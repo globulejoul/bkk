@@ -312,21 +312,27 @@ async function loadWeather() {
   try {
     const r = await fetch(
       'https://api.open-meteo.com/v1/forecast?latitude=13.75&longitude=100.52' +
-      '&daily=temperature_2m_max,temperature_2m_min,weathercode' +
-      '&current=temperature_2m,weathercode' +
-      '&timezone=Asia/Bangkok&forecast_days=7'
+      '&daily=temperature_2m_max,temperature_2m_min,apparent_temperature_max' +
+      '&current=temperature_2m,apparent_temperature,weathercode' +
+      '&timezone=Asia/Bangkok&past_days=7&forecast_days=7'
     );
     const data = await r.json();
     const cur = data.current || {};
     const daily = data.daily || {};
 
     const icon = weatherIcon(cur.weathercode);
+    const feel = cur.apparent_temperature != null ? ` (ressenti ${Math.round(cur.apparent_temperature)}°)` : '';
     $('#weather-current').innerHTML = `
       <div><span class="temp-big">${icon} ${Math.round(cur.temperature_2m)}°C</span></div>
-      <div>Bangkok maintenant</div>
+      <div>Bangkok maintenant${esc(feel)}</div>
     `;
 
-    const labels = (daily.time || []).map(d => new Date(d).toLocaleDateString('fr-FR', {weekday: 'short', day: 'numeric'}));
+    const today = new Date().toISOString().slice(0, 10);
+    const labels = (daily.time || []).map(d => {
+      const label = new Date(d).toLocaleDateString('fr-FR', {weekday: 'short', day: 'numeric'});
+      return d === today ? '> ' + label : label;
+    });
+
     const ctx = $('#weather-chart').getContext('2d');
     if (weatherChart) weatherChart.destroy();
     weatherChart = new Chart(ctx, {
@@ -341,7 +347,7 @@ async function loadWeather() {
             backgroundColor: '#d35b1718',
             fill: true,
             tension: 0.4,
-            pointRadius: 3,
+            pointRadius: 2,
           },
           {
             label: 'Min °C',
@@ -350,15 +356,24 @@ async function loadWeather() {
             backgroundColor: '#00714c18',
             fill: true,
             tension: 0.4,
-            pointRadius: 3,
+            pointRadius: 2,
+          },
+          {
+            label: 'Ressenti max',
+            data: daily.apparent_temperature_max || [],
+            borderColor: '#d35b1766',
+            borderDash: [4, 3],
+            fill: false,
+            tension: 0.4,
+            pointRadius: 0,
           },
         ],
       },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { labels: { color: '#464d2c', font: { family: 'JetBrains Mono', size: 11 } } } },
+        plugins: { legend: { labels: { color: '#464d2c', font: { family: 'JetBrains Mono', size: 10 } } } },
         scales: {
-          x: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 10 } }, grid: { display: false } },
+          x: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 9 }, maxRotation: 45 }, grid: { display: false } },
           y: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 10 }, callback: v => v + '°' }, grid: { color: '#cfcdcb' } },
         },
       },
