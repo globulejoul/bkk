@@ -312,13 +312,14 @@ def _parse_duffel_offer(offer: dict, origin: str, destination: str,
         if out_dur > max_fly_h or ret_dur > max_fly_h:
             return None
 
-        # Airlines
+        # Airlines (full names from Duffel)
         airlines_set: list[str] = []
         for seg in out_segments + ret_segments:
-            carrier = (seg.get("operating_carrier", {}).get("iata_code") or
-                       seg.get("marketing_carrier", {}).get("iata_code", ""))
-            if carrier and carrier not in airlines_set:
-                airlines_set.append(carrier)
+            op = seg.get("operating_carrier", {})
+            mk = seg.get("marketing_carrier", {})
+            name = op.get("name") or mk.get("name") or op.get("iata_code") or mk.get("iata_code", "")
+            if name and name not in airlines_set:
+                airlines_set.append(name)
 
         return FlightResult(
             price=total, currency=currency,
@@ -387,10 +388,11 @@ def search_duffel_oneway(*, origin: str, destination: str,
                 segs = slices[0].get("segments", [])
                 airlines_list = []
                 for seg in segs:
-                    c = (seg.get("operating_carrier", {}).get("iata_code") or
-                         seg.get("marketing_carrier", {}).get("iata_code", ""))
-                    if c and c not in airlines_list:
-                        airlines_list.append(c)
+                    op = seg.get("operating_carrier", {})
+                    mk = seg.get("marketing_carrier", {})
+                    name = op.get("name") or mk.get("name") or op.get("iata_code") or mk.get("iata_code", "")
+                    if name and name not in airlines_list:
+                        airlines_list.append(name)
                 best = FlightResult(
                     price=total, currency=offer.get("total_currency", currency),
                     origin=origin, destination=destination,

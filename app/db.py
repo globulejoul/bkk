@@ -310,18 +310,26 @@ def trip_history(c: sqlite3.Connection, trip: str,
 
 
 def trip_breakdown(c: sqlite3.Connection, trip: str) -> list[dict]:
-    """Latest best per origin/destination combination."""
+    """Best price per origin/destination, with source and dates."""
     rows = c.execute("""
-        SELECT origin, destination,
-               MIN(price_eur) AS best_eur,
-               MAX(check_date) AS last_seen,
-               airlines, outbound_date, return_date, booking_url
-        FROM checks
-        WHERE trip_name = ? AND price_eur IS NOT NULL
-          AND check_date >= date('now', '-30 days')
-        GROUP BY origin, destination
+        SELECT c.origin, c.destination, c.price_eur AS best_eur,
+               c.check_date AS last_seen, c.airlines,
+               c.outbound_date, c.return_date, c.booking_url, c.source
+        FROM checks c
+        INNER JOIN (
+            SELECT origin, destination, MIN(price_eur) AS min_price
+            FROM checks
+            WHERE trip_name = ? AND price_eur IS NOT NULL
+              AND check_date >= date('now', '-30 days')
+            GROUP BY origin, destination
+        ) best ON c.origin = best.origin
+             AND c.destination = best.destination
+             AND c.price_eur = best.min_price
+        WHERE c.trip_name = ? AND c.price_eur IS NOT NULL
+          AND c.check_date >= date('now', '-30 days')
+        GROUP BY c.origin, c.destination
         ORDER BY best_eur ASC
-    """, (trip,)).fetchall()
+    """, (trip, trip)).fetchall()
     return [dict(r) for r in rows]
 
 

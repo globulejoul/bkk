@@ -5,6 +5,13 @@ const $$ = (s) => document.querySelectorAll(s);
 const fmt = new Intl.NumberFormat('fr-FR');
 const dateFmt = (s) => s ? new Date(s).toLocaleDateString('fr-FR') : '—';
 const dateTimeFmt = (s) => s ? new Date(s).toLocaleString('fr-FR') : '—';
+const sourceLabel = (s) => {
+  if (!s) return '—';
+  if (s === 'duffel') return 'Compagnies';
+  if (s === 'duffel_ow') return 'Compagnies';
+  if (s.startsWith('google') || s.startsWith('fast')) return 'Google Flights';
+  return esc(s);
+};
 const esc = (s) => {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -242,12 +249,14 @@ async function loadTripDetail() {
       <td>${esc(b.destination)}</td>
       <td class="price-cell">${Math.round(b.best_eur)}€</td>
       <td>${esc(b.airlines) || '—'}</td>
+      <td>${sourceLabel(b.source)}</td>
+      <td>${b.outbound_date && b.return_date ? dateFmt(b.outbound_date) + ' → ' + dateFmt(b.return_date) : '—'}</td>
       <td>${dateFmt(b.last_seen)}</td>
     `;
     tbody.appendChild(tr);
   });
   if (!breakdown.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="dim">Pas encore de données.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="dim">Pas encore de données.</td></tr>';
   }
 }
 
