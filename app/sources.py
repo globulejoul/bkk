@@ -51,16 +51,23 @@ def search_fast_flights(*, origin: str, destination: str,
     matching the VPN exit country.
     """
     try:
-        from fast_flights import FlightData, Passengers, get_flights
+        # v3 API
+        from fast_flights import FlightQuery, Passengers, create_query, get_flights
+        _v3 = True
     except ImportError:
-        print("fast-flights not installed")
-        return FlightResult(
-            price=None, currency="EUR", origin=origin,
-            destination=destination, outbound_date=outbound_date,
-            return_date=return_date, out_h=0, ret_h=0,
-            out_stops=0, ret_stops=0, airlines="", booking_url="",
-            source="fast_flights", market_label=market_label,
-        )
+        try:
+            # v2 fallback
+            from fast_flights import FlightData as FlightQuery, Passengers, get_flights
+            _v3 = False
+        except ImportError:
+            print("fast-flights not installed")
+            return FlightResult(
+                price=None, currency="EUR", origin=origin,
+                destination=destination, outbound_date=outbound_date,
+                return_date=return_date, out_h=0, ret_h=0,
+                out_stops=0, ret_stops=0, airlines="", booking_url="",
+                source="fast_flights", market_label=market_label,
+            )
 
     # Configure proxy via environment if VPN routing requested
     old_proxies = {}
@@ -87,19 +94,31 @@ def search_fast_flights(*, origin: str, destination: str,
         os.environ["HTTPS_PROXY"] = proxy
 
     try:
-        result = get_flights(
-            flight_data=[
-                FlightData(date=outbound_date,
-                           from_airport=origin, to_airport=destination),
-                FlightData(date=return_date,
-                           from_airport=destination, to_airport=origin),
-            ],
-            trip="round-trip",
-            seat="economy",
-            passengers=Passengers(adults=adults, children=0,
-                                  infants_in_seat=0, infants_on_lap=0),
-            fetch_mode="fallback",
-        )
+        if _v3:
+            query = create_query(
+                flights=[
+                    FlightQuery(date=outbound_date,
+                                from_airport=origin, to_airport=destination),
+                    FlightQuery(date=return_date,
+                                from_airport=destination, to_airport=origin),
+                ],
+                trip="round-trip", seat="economy",
+                passengers=Passengers(adults=adults),
+            )
+            result = get_flights(query)
+        else:
+            result = get_flights(
+                flight_data=[
+                    FlightQuery(date=outbound_date,
+                                from_airport=origin, to_airport=destination),
+                    FlightQuery(date=return_date,
+                                from_airport=destination, to_airport=origin),
+                ],
+                trip="round-trip", seat="economy",
+                passengers=Passengers(adults=adults, children=0,
+                                      infants_in_seat=0, infants_on_lap=0),
+                fetch_mode="fallback",
+            )
         flights = getattr(result, "flights", []) or []
         if not flights:
             return FlightResult(
@@ -225,28 +244,43 @@ def search_fast_flights_oneway(*, origin: str, destination: str,
                                label: str = "") -> FlightResult:
     """One-way fast-flights search."""
     try:
-        from fast_flights import FlightData, Passengers, get_flights
+        from fast_flights import FlightQuery, Passengers, create_query, get_flights
+        _v3 = True
     except ImportError:
-        return FlightResult(
-            price=None, currency="EUR", origin=origin,
-            destination=destination, outbound_date=dep_date,
-            return_date="", out_h=0, ret_h=0, out_stops=0, ret_stops=0,
-            airlines="", booking_url="", source="fast_flights_ow",
-            market_label=label,
-        )
+        try:
+            from fast_flights import FlightData as FlightQuery, Passengers, get_flights
+            _v3 = False
+        except ImportError:
+            return FlightResult(
+                price=None, currency="EUR", origin=origin,
+                destination=destination, outbound_date=dep_date,
+                return_date="", out_h=0, ret_h=0, out_stops=0, ret_stops=0,
+                airlines="", booking_url="", source="fast_flights_ow",
+                market_label=label,
+            )
 
     try:
-        result = get_flights(
-            flight_data=[
-                FlightData(date=dep_date,
-                           from_airport=origin, to_airport=destination),
-            ],
-            trip="one-way",
-            seat="economy",
-            passengers=Passengers(adults=adults, children=0,
-                                  infants_in_seat=0, infants_on_lap=0),
-            fetch_mode="fallback",
-        )
+        if _v3:
+            query = create_query(
+                flights=[
+                    FlightQuery(date=dep_date,
+                                from_airport=origin, to_airport=destination),
+                ],
+                trip="one-way", seat="economy",
+                passengers=Passengers(adults=adults),
+            )
+            result = get_flights(query)
+        else:
+            result = get_flights(
+                flight_data=[
+                    FlightQuery(date=dep_date,
+                                from_airport=origin, to_airport=destination),
+                ],
+                trip="one-way", seat="economy",
+                passengers=Passengers(adults=adults, children=0,
+                                      infants_in_seat=0, infants_on_lap=0),
+                fetch_mode="fallback",
+            )
         flights = getattr(result, "flights", []) or []
         if not flights:
             return FlightResult(
