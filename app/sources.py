@@ -219,17 +219,13 @@ def search_duffel(*, origins: list[str], destinations: list[str],
     all_results: list[FlightResult] = []
     total = len(origins) * len(destinations) * len(outbound_dates) * len(return_dates)
     done = 0
-    consecutive_429 = 0
+    remaining_quota = 60  # Duffel: 60 req/min
 
     for out_d in outbound_dates:
         for ret_d in return_dates:
             for orig in origins:
                 for dest in destinations:
                     done += 1
-                    if consecutive_429 >= 5:
-                        print(f"  Duffel: trop de 429, skip restant ({done}/{total})")
-                        all_results.sort(key=lambda r: r.price or 1e9)
-                        return all_results
                     try:
                         body = {
                             "data": {
@@ -249,11 +245,28 @@ def search_duffel(*, origins: list[str], destinations: list[str],
                             params={"return_offers": "true", "supplier_timeout": "20000"},
                             timeout=30,
                         )
+
+                        # Read rate limit headers
+                        rl_remaining = r.headers.get("ratelimit-remaining")
+                        rl_reset = r.headers.get("ratelimit-reset")
+                        if rl_remaining is not None:
+                            remaining_quota = int(rl_remaining)
+
                         if r.status_code == 429:
-                            consecutive_429 += 1
-                            time.sleep(2.0)
+                            # Wait until reset
+                            wait = 60.0
+                            if rl_reset:
+                                try:
+                                    from email.utils import parsedate_to_datetime
+                                    reset_dt = parsedate_to_datetime(rl_reset)
+                                    wait = max(1.0, (reset_dt - datetime.now(
+                                        tz=reset_dt.tzinfo)).total_seconds())
+                                except Exception:
+                                    pass
+                            print(f"  Duffel 429 — pause {wait:.0f}s ({done}/{total})")
+                            time.sleep(wait)
                             continue
-                        consecutive_429 = 0
+
                         if r.status_code not in (200, 201):
                             continue
 
@@ -267,10 +280,17 @@ def search_duffel(*, origins: list[str], destinations: list[str],
                     except Exception as e:
                         print(f"  Duffel {orig}→{dest} {out_d}/{ret_d} error: {e}")
 
-                    time.sleep(0.5)
+                    # Adaptive delay based on remaining quota
+                    if remaining_quota <= 5:
+                        time.sleep(5.0)  # proche de la limite
+                    elif remaining_quota <= 15:
+                        time.sleep(2.0)
+                    else:
+                        time.sleep(1.0)
 
-            if done % 24 == 0:
-                print(f"  Duffel: {done}/{total} appels ({len(all_results)} résultats)")
+            if done % 30 == 0:
+                print(f"  Duffel: {done}/{total} ({len(all_results)} résultats, "
+                      f"quota restant: {remaining_quota})")
 
     all_results.sort(key=lambda r: r.price or 1e9)
     return all_results
