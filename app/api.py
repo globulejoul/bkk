@@ -29,6 +29,9 @@ scheduler: BackgroundScheduler | None = None
 _run_lock = threading.Lock()
 
 
+RUN_TIMEOUT = 600  # 10 minutes max par run
+
+
 def _run_safe() -> None:
     if not _run_lock.acquire(blocking=False):
         print("Skip: previous run still in progress")
@@ -37,8 +40,22 @@ def _run_safe() -> None:
         cfg = config.load()
         result = watcher.run_once(cfg)
         print(f"Run complete: {result}")
+    except Exception as e:
+        print(f"Run error: {e}")
     finally:
         _run_lock.release()
+
+
+def _cleanup_stale_runs() -> None:
+    """Mark orphaned 'running' runs as timed out (from previous crashes)."""
+    with db.conn() as c:
+        stale = c.execute(
+            "UPDATE run_log SET status='timeout', finished_at=started_at, "
+            "error='Container restarted during run' "
+            "WHERE status='running'"
+        ).rowcount
+        if stale:
+            print(f"Cleaned up {stale} stale run(s)")
 
 
 @asynccontextmanager
@@ -46,6 +63,7 @@ async def lifespan(app: FastAPI):
     global scheduler
     cfg = config.load()
     db.init()
+    _cleanup_stale_runs()
     scheduler = BackgroundScheduler(timezone="Europe/Paris")
     trigger = CronTrigger.from_crontab(cfg.schedule_cron)
     scheduler.add_job(_run_safe, trigger, id="watcher",
