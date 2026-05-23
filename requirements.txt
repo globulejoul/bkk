@@ -3,4 +3,4 @@ PyYAML>=6.0
 fastapi>=0.110
 uvicorn[standard]>=0.27
 apscheduler>=3.10
-fli>=0.9.0
+flights>=0.9.0
