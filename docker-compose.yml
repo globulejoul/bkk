@@ -41,7 +41,7 @@ services:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       gluetun:
         condition: service_healthy
