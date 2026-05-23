@@ -121,15 +121,29 @@ def _search_fli(*, origin: str, destination: str,
 
         # Airlines from legs
         airlines_list: list[str] = []
-        for leg in getattr(best, "legs", []) or []:
+        legs = getattr(best, "legs", []) or []
+        for leg in legs:
             airline = getattr(leg, "airline", None)
             if airline:
-                # airline may be an Airline enum or a string
-                name = airline.value if hasattr(airline, "value") else str(airline)
+                # airline may be an Airline enum, a string, or other
+                if hasattr(airline, "value"):
+                    name = str(airline.value)
+                elif hasattr(airline, "name"):
+                    name = str(airline.name)
+                else:
+                    name = str(airline)
                 if name and name not in airlines_list:
                     airlines_list.append(name)
 
+        # Duration: fli returns total minutes for the trip
         dur_h = duration / 60 if isinstance(duration, (int, float)) else 0
+        # If duration is 0 but we have legs, try to extract from legs
+        if dur_h == 0 and legs:
+            for leg in legs:
+                leg_dur = getattr(leg, "duration", 0) or 0
+                if isinstance(leg_dur, (int, float)) and leg_dur > 0:
+                    dur_h = leg_dur / 60
+                    break
 
         return FlightResult(
             price=float(price) if price else None,
