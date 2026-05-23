@@ -49,14 +49,14 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
     out_date = sources.mid_date(trip.outbound_window)
     ret_date = sources.mid_date(trip.return_window)
 
-    # 1) fast-flights : source primaire (toutes les paires origin×dest)
-    print(f"\n→ {trip.name}: fast-flights {out_date} / {ret_date}")
-    ff_results = sources.search_fast_flights_multi(
+    # 1) Google Flights via fli (source primaire)
+    print(f"\n→ {trip.name}: Google Flights {out_date} / {ret_date}")
+    ff_results = sources.search_google_flights_multi(
         origins=cfg.origins, destinations=cfg.destinations,
         outbound_date=out_date, return_date=ret_date,
         adults=cfg.adults, max_fly_h=cfg.max_fly_duration_hours,
     )
-    print(f"  fast-flights: {len(ff_results)} résultats valides")
+    print(f"  Google Flights: {len(ff_results)} résultats valides")
 
     # 2) Duffel : source compagnies directes (même dates)
     duffel_results = sources.search_duffel(
@@ -248,8 +248,8 @@ def _compare_oneway(cfg: Config, best: sources.FlightResult,
 
     # One-way outbound (best origin → best destination)
     ow_out = None
-    # Try fast-flights first
-    ff_out = sources.search_fast_flights_oneway(
+    # Try Google Flights first
+    ff_out = sources.search_google_flights_oneway(
         origin=best.origin, destination=best.destination,
         dep_date=best.outbound_date, adults=cfg.adults,
         label=f"OW {best.origin}→{best.destination}",
@@ -273,7 +273,7 @@ def _compare_oneway(cfg: Config, best: sources.FlightResult,
 
     # One-way return (best destination → best origin)
     ow_ret = None
-    ff_ret = sources.search_fast_flights_oneway(
+    ff_ret = sources.search_google_flights_oneway(
         origin=best.destination, destination=best.origin,
         dep_date=best.return_date, adults=cfg.adults,
         label=f"OW {best.destination}→{best.origin}",
@@ -324,28 +324,7 @@ def _compare_oneway(cfg: Config, best: sources.FlightResult,
 
 def _build_cross_checks(cfg: Config, best: sources.FlightResult,
                         rates: dict[str, float]) -> list[dict]:
-    """Cross-check via VPN TH (géo price discrimination)."""
-    checks = []
-
-    # fast-flights via VPN Thailand
-    try:
-        ff_th = sources.search_fast_flights(
-            origin=best.origin, destination=best.destination,
-            outbound_date=best.outbound_date,
-            return_date=best.return_date,
-            adults=cfg.adults, via_vpn=True,
-            market_label="Google TH (VPN)",
-        )
-        if ff_th.price is not None:
-            eur_eq = fx.to_eur(ff_th.price, ff_th.currency, rates)
-            checks.append({
-                "label": ff_th.market_label,
-                "source": "fast_flights_th",
-                "price": ff_th.price, "currency": ff_th.currency,
-                "eur_equiv": eur_eq, "airlines": ff_th.airlines,
-            })
-            print(f"  Google TH (VPN): {ff_th.price:.0f} {ff_th.currency}")
-    except Exception as e:
-        print(f"  Google TH (VPN) fail: {e}")
-
-    return checks
+    """Cross-checks additionnels (extensible)."""
+    # VPN cross-check désactivé pour l'instant (fast-flights retiré).
+    # Pourra être réimplémenté avec fli si besoin.
+    return []
