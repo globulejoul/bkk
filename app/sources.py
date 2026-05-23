@@ -122,9 +122,12 @@ def _search_fli(*, origin: str, destination: str,
         # Airlines from legs
         airlines_list: list[str] = []
         for leg in getattr(best, "legs", []) or []:
-            airline = getattr(leg, "airline", "") or ""
-            if airline and airline not in airlines_list:
-                airlines_list.append(airline)
+            airline = getattr(leg, "airline", None)
+            if airline:
+                # airline may be an Airline enum or a string
+                name = airline.value if hasattr(airline, "value") else str(airline)
+                if name and name not in airlines_list:
+                    airlines_list.append(name)
 
         dur_h = duration / 60 if isinstance(duration, (int, float)) else 0
 
