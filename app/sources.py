@@ -117,7 +117,7 @@ def search_fast_flights(*, origin: str, destination: str,
                 trip="round-trip", seat="economy",
                 passengers=Passengers(adults=adults, children=0,
                                       infants_in_seat=0, infants_on_lap=0),
-                fetch_mode="local",
+                # fetch_mode omitted: uses primp (no playwright needed)
             )
         flights = getattr(result, "flights", []) or []
         if not flights:
@@ -279,7 +279,7 @@ def search_fast_flights_oneway(*, origin: str, destination: str,
                 trip="one-way", seat="economy",
                 passengers=Passengers(adults=adults, children=0,
                                       infants_in_seat=0, infants_on_lap=0),
-                fetch_mode="local",
+                # fetch_mode omitted: uses primp (no playwright needed)
             )
         flights = getattr(result, "flights", []) or []
         if not flights:
