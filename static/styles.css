@@ -251,9 +251,7 @@ h2 {
   grid-template-columns: 1fr;
   gap: 2rem;
 }
-@media (min-width: 1024px) {
-  .trip-detail { grid-template-columns: 1.4fr 1fr; }
-}
+/* grid-template-columns for trip-detail is set in the 3-row layout section below */
 
 .trip-chart-wrap {
   background: var(--bg-card);
@@ -495,4 +493,284 @@ tbody tr:hover { background: var(--bg-elev); }
   .trip-card .price-main { font-size: 1.75rem; }
   .tabs button { padding: 0.5rem 0.6rem; font-size: 0.75rem; }
   .trip-card .price-stats { font-size: 0.65rem; }
+}
+
+/* ── Trip detail grid: 3-row layout ───────────────────── */
+
+@media (min-width: 1024px) {
+  .trip-detail {
+    grid-template-columns: 1.4fr 1fr;
+    grid-template-rows: auto auto auto;
+  }
+  .trip-heatmap,
+  .trip-stats {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── Heatmap ───────────────────────────────────────────── */
+
+.trip-heatmap {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+
+#heatmap-grid {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.hm-table {
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+}
+.hm-table th {
+  font-size: 0.6rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  padding: 0.25rem 0.15rem;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
+  border-bottom: none;
+}
+.hm-table th.hm-corner {
+  background: transparent;
+}
+.hm-table th.hm-col-header {
+  text-align: center;
+  writing-mode: vertical-lr;
+  transform: rotate(180deg);
+  height: 3.5rem;
+  vertical-align: bottom;
+}
+.hm-table th.hm-row-header {
+  text-align: right;
+  padding-right: 0.5rem;
+}
+
+.hm-cell {
+  width: 3rem;
+  min-width: 3rem;
+  height: 2rem;
+  text-align: center;
+  padding: 0.2rem;
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 500;
+  border-radius: 3px;
+  border: 2px solid transparent;
+  cursor: default;
+  transition: transform 0.1s;
+}
+.hm-cell:hover {
+  transform: scale(1.15);
+  z-index: 1;
+  position: relative;
+}
+.hm-cell.hm-cheapest {
+  border-color: var(--gold);
+  box-shadow: 0 0 6px var(--gold-glow);
+}
+.hm-cell.hm-empty {
+  background: var(--bg-elev) !important;
+  color: var(--text-faint);
+}
+.hm-no-data {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  padding: 2rem 0;
+  text-align: center;
+}
+
+/* ── Stats section ─────────────────────────────────────── */
+
+.trip-stats {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+@media (max-width: 768px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.stats-trend {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+.stats-trend .trend-arrow {
+  font-size: 1.6rem;
+  line-height: 1;
+}
+.stats-trend .trend-text {
+  font-size: 0.8rem;
+}
+
+.stats-score {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+.score-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+.score-bar-track {
+  width: 80px;
+  height: 8px;
+  background: var(--bg-elev);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.score-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s;
+}
+.score-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.stats-dow {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+.stats-dow .dow-title {
+  margin-bottom: 0.5rem;
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dow-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.35rem;
+  height: 80px;
+}
+.dow-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  flex: 1;
+}
+.dow-bar {
+  width: 100%;
+  min-width: 20px;
+  max-width: 36px;
+  border-radius: 3px 3px 0 0;
+  transition: height 0.3s;
+}
+.dow-bar.dow-cheapest {
+  box-shadow: 0 0 0 2px var(--gold);
+}
+.dow-label {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  text-align: center;
+}
+.dow-price {
+  font-size: 0.55rem;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.stats-no-data {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  padding: 1rem 0;
+}
+
+/* ── Card indicators (overview) ────────────────────────── */
+
+.card-indicators {
+  display: flex;
+  flex-direction: row;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  flex-wrap: wrap;
+}
+
+.trend-badge,
+.score-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.trend-badge {
+  background: var(--bg-elev);
+  color: var(--text-dim);
+}
+.trend-badge.falling {
+  background: #00714c18;
+  color: var(--green);
+}
+.trend-badge.rising {
+  background: #d35b1718;
+  color: var(--rose);
+}
+.trend-badge.stable {
+  background: var(--bg-elev);
+  color: var(--text-dim);
+}
+.score-badge {
+  color: #fff;
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .trip-heatmap,
+  .trip-stats {
+    padding: 0.75rem;
+    overflow: hidden;
+  }
+  .hm-cell {
+    width: 2.5rem;
+    min-width: 2.5rem;
+    height: 1.6rem;
+    font-size: 0.5rem;
+  }
+  .hm-table th.hm-col-header {
+    height: 2.5rem;
+  }
+  .stats-grid {
+    gap: 1rem;
+  }
+  .card-indicators {
+    font-size: 0.65rem;
+  }
+  .trend-badge, .score-badge {
+    font-size: 0.6rem;
+    padding: 0.1rem 0.4rem;
+  }
 }

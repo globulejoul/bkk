@@ -71,6 +71,31 @@ def _body_new_low(a: dict) -> str:
         lines.append(f"Historique: {pct:.0f}e percentile "
                      f"({'très bon' if pct <= 10 else 'bon' if pct <= 25 else 'correct'})")
 
+    # Trend info
+    trend = a.get("trend")
+    if trend:
+        direction = trend.get("direction", "stable")
+        change = trend.get("change_pct", 0)
+        if direction == "falling":
+            lines.append(f"Tendance 7j: ↘ en baisse ({change:+.1f}%)")
+        elif direction == "rising":
+            lines.append(f"Tendance 7j: ↗ en hausse ({change:+.1f}%)")
+        else:
+            lines.append("Tendance 7j: → stable")
+
+    # Buy score
+    buy_score = a.get("buy_score")
+    if buy_score is not None:
+        if buy_score >= 70:
+            label = "Bon moment pour acheter"
+        elif buy_score >= 50:
+            label = "Moment correct"
+        elif buy_score >= 30:
+            label = "Attendre si possible"
+        else:
+            label = "Pas le bon moment"
+        lines.append(f"Score achat: {buy_score}/100 — {label}")
+
     # Cross-checks
     cross = a.get("cross_checks") or []
     if cross:
@@ -106,6 +131,29 @@ def _body_new_low(a: dict) -> str:
                          f"({ow['ow_ret_airlines']})")
         elif saving < -20:
             lines.append(f"A/R moins cher que 2 OW ({ow['ow_total']:.0f}€)")
+
+    # Open-jaw comparison
+    oj = a.get("openjaw_comparison")
+    if oj:
+        lines.append("")
+        oj_saving = oj["saving"]
+        if oj_saving > 20:
+            lines.append(
+                f"**🔀 Open-jaw = {oj['oj_total']:.0f}€ "
+                f"(économie {oj_saving:.0f}€)**"
+            )
+            lines.append(
+                f"  Aller: {oj['oj_out_origin']}→{oj['oj_out_dest']} "
+                f"{oj['oj_out_price']:.0f}€ ({oj['oj_out_airlines']})"
+            )
+            lines.append(
+                f"  Retour: {oj['oj_ret_origin']}→{oj['oj_ret_dest']} "
+                f"{oj['oj_ret_price']:.0f}€ ({oj['oj_ret_airlines']})"
+            )
+        elif oj_saving < -20:
+            lines.append(
+                f"A/R classique moins cher que open-jaw ({oj['oj_total']:.0f}€)"
+            )
 
     return "\n".join(lines)
 

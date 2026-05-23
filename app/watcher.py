@@ -9,6 +9,100 @@ from app import db, fx, notify, sources
 from app.config import Config
 
 
+# ── Trend & buy-score helpers ───────────────────────────────────
+
+
+def _calc_trend(prices_7d: list[tuple[str, float]]) -> dict[str, Any]:
+    """Analyse la tendance sur les N derniers jours.
+
+    *prices_7d*: list de (date_str, price).
+    Retourne dict avec direction, change_pct, recommendation.
+    """
+    if len(prices_7d) < 2:
+        return {"direction": "stable", "change_pct": 0.0,
+                "recommendation": "Prix stable"}
+
+    mid = len(prices_7d) // 2
+    first_half = [p for _, p in prices_7d[:mid]]
+    second_half = [p for _, p in prices_7d[mid:]]
+    avg_first = sum(first_half) / len(first_half) if first_half else 0
+    avg_second = sum(second_half) / len(second_half) if second_half else 0
+
+    if avg_first == 0:
+        change_pct = 0.0
+    else:
+        change_pct = round((avg_second - avg_first) / avg_first * 100, 1)
+
+    # Threshold: ±2% pour considérer un mouvement significatif
+    if change_pct < -2:
+        direction = "falling"
+        recommendation = "Tendance baissière, patiente"
+    elif change_pct > 2:
+        # Rebond après un creux ?
+        direction = "rising"
+        recommendation = "Rebond après un creux, achète"
+    else:
+        direction = "stable"
+        recommendation = "Prix stable"
+
+    return {"direction": direction, "change_pct": change_pct,
+            "recommendation": recommendation}
+
+
+def _calc_buy_score(price_eur: float, trip, cfg: Config,
+                    rates: dict[str, float],
+                    pct: float | None,
+                    trend: dict[str, Any]) -> int:
+    """Retourne un score d'achat 0-100.
+
+    Facteurs:
+    - Percentile (40%) : pct bas = score haut
+    - Tendance (25%)   : rising after low → achète, falling → attends
+    - Jour semaine (10%): mar/mer mieux
+    - Délai départ (25%): sweet spot 45-90 jours
+    """
+    score = 0
+
+    # 1) Percentile factor (40 pts max)
+    if pct is not None:
+        score += int(40 * (1 - pct / 100))
+    else:
+        score += 20  # pas assez de données → neutre
+
+    # 2) Trend factor (25 pts max)
+    direction = trend.get("direction", "stable")
+    if direction == "falling":
+        score += 5       # tendance baisse → attendre
+    elif direction == "rising":
+        score += 25      # rebond → acheter maintenant
+    else:
+        score += 15      # stable → correct
+
+    # 3) Day of week factor (10 pts max)
+    dow = date.today().weekday()  # 0=lun, 1=mar, 2=mer, ...
+    if dow in (1, 2):  # mardi, mercredi
+        score += 10
+    else:
+        score += 5
+
+    # 4) Time to departure factor (25 pts max)
+    try:
+        out_date = datetime.strptime(trip.outbound_window[0], "%Y-%m-%d").date()
+        days_to_dep = (out_date - date.today()).days
+        if 45 <= days_to_dep <= 90:
+            score += 25
+        elif 30 <= days_to_dep < 45 or 90 < days_to_dep <= 120:
+            score += 20
+        elif days_to_dep < 30:
+            score += 15
+        else:
+            score += 10
+    except Exception:
+        score += 12
+
+    return min(100, max(0, score))
+
+
 def run_once(cfg: Config) -> dict[str, Any]:
     """Execute one full check across all trips. Returns summary."""
     db.init()
@@ -148,6 +242,11 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
                 "lowest_destination": best.destination,
                 "lowest_booking_url": best.booking_url,
             })
+        # Flash mode : si seuil atteint, activer flash pendant 48h
+        if hit_threshold:
+            flash_until = (datetime.now() + timedelta(hours=48)).isoformat()
+            update["flash_until"] = flash_until
+            print(f"  ⚡ Flash mode activé jusqu'à {flash_until}")
         db.upsert_state(c, trip.name, **update)
 
     alert_count = 0
@@ -159,14 +258,23 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
     if pct is not None:
         print(f"  Percentile: {pct:.0f}e (0=cheapest)")
 
+    # 6b) Trend calculation from rolling data
+    trend = _calc_trend(rolling)
+    print(f"  Tendance 7j: {trend['direction']} ({trend['change_pct']:+.1f}%)")
+
+    # 6c) Buy score
+    buy_score = _calc_buy_score(best_price_eur, trip, cfg, rates, pct, trend)
+    print(f"  Score achat: {buy_score}/100")
+
     # Alerte percentile : prix dans le 10e percentile historique
     in_low_percentile = pct is not None and pct <= 10.0
 
-    # 7) On alerts: cross-check VPN + comparaison RT vs 2 one-ways
+    # 7) On alerts: cross-check VPN + comparaison RT vs 2 one-ways + open-jaw
     should_alert = new_low or hit_threshold or rise or in_low_percentile
     if should_alert:
         cross_checks = _build_cross_checks(cfg, best, rates)
         ow_comparison = _compare_oneway(cfg, best, rates)
+        oj_comparison = _compare_openjaw(cfg, best, rates)
 
         with db.conn() as c:
             for cc in cross_checks:
@@ -193,6 +301,8 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
                 "previous_low": prev_low,
                 "hit_threshold": hit_threshold,
                 "percentile": pct,
+                "trend": trend,
+                "buy_score": buy_score,
                 "origin": best.origin, "destination": best.destination,
                 "outbound_date": best.outbound_date,
                 "return_date": best.return_date,
@@ -202,6 +312,7 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
                 "booking_url": best.booking_url,
                 "cross_checks": cross_checks,
                 "oneway_comparison": ow_comparison,
+                "openjaw_comparison": oj_comparison,
             }
             notify.send_ntfy(cfg, payload)
             with db.conn() as c:
@@ -213,6 +324,8 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
                 "kind": "rise", "trip": trip.name,
                 "price": best_price_eur, **rise,
                 "percentile": pct,
+                "trend": trend,
+                "buy_score": buy_score,
                 "origin": best.origin, "destination": best.destination,
                 "outbound_date": best.outbound_date,
                 "return_date": best.return_date,
@@ -323,6 +436,129 @@ def _compare_oneway(cfg: Config, best: sources.FlightResult,
     else:
         print(f"  2 OW = {total_ow:.0f}€ vs RT {rt_eur:.0f}€ → RT moins cher")
     return result
+
+
+def _compare_openjaw(cfg: Config, best: sources.FlightResult,
+                     rates: dict[str, float]) -> dict | None:
+    """Recherche open-jaw : aller vers best.destination, retour depuis
+    une AUTRE destination thaï, ou retour vers une AUTRE origine française.
+
+    Ne teste que 2-3 combinaisons prometteuses pour limiter les appels API.
+    """
+    rt_eur = _to_eur(best, rates)
+    if rt_eur is None:
+        return None
+
+    # Destinations TH alternatives (exclure celle du best)
+    thai_dests = [d for d in cfg.destinations if d != best.destination]
+    # Origines FR alternatives (exclure celle du best)
+    fr_origins = [o for o in cfg.origins if o != best.origin]
+
+    if not thai_dests and not fr_origins:
+        return None
+
+    print(f"  Open-jaw: recherche alternatives pour {best.origin}→{best.destination}...")
+
+    best_oj: dict | None = None
+    best_oj_total = 1e9
+
+    # Stratégie 1 : même aller, retour depuis autre destination TH → best.origin
+    for alt_dest in thai_dests[:2]:
+        try:
+            # Aller : best.origin → best.destination (one-way)
+            ow_out = sources.search_duffel_oneway(
+                origin=best.origin, destination=best.destination,
+                dep_date=best.outbound_date, adults=cfg.adults,
+                currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
+            )
+            time.sleep(1.0)
+
+            # Retour : alt_dest → best.origin (one-way)
+            ow_ret = sources.search_duffel_oneway(
+                origin=alt_dest, destination=best.origin,
+                dep_date=best.return_date, adults=cfg.adults,
+                currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
+            )
+            time.sleep(1.0)
+
+            if ow_out and ow_ret:
+                out_eur = _to_eur(ow_out, rates)
+                ret_eur = _to_eur(ow_ret, rates)
+                if out_eur and ret_eur:
+                    total = out_eur + ret_eur
+                    if total < best_oj_total:
+                        best_oj_total = total
+                        best_oj = {
+                            "type": "open_jaw",
+                            "rt_price": rt_eur,
+                            "oj_out_origin": best.origin,
+                            "oj_out_dest": best.destination,
+                            "oj_out_price": out_eur,
+                            "oj_out_airlines": ow_out.airlines,
+                            "oj_ret_origin": alt_dest,
+                            "oj_ret_dest": best.origin,
+                            "oj_ret_price": ret_eur,
+                            "oj_ret_airlines": ow_ret.airlines,
+                            "oj_total": total,
+                            "saving": rt_eur - total,
+                        }
+        except Exception as e:
+            print(f"  Open-jaw {best.origin}→{best.destination} / "
+                  f"{alt_dest}→{best.origin} error: {e}")
+
+    # Stratégie 2 : même aller, retour vers autre origine FR
+    for alt_orig in fr_origins[:1]:
+        try:
+            ow_out = sources.search_duffel_oneway(
+                origin=best.origin, destination=best.destination,
+                dep_date=best.outbound_date, adults=cfg.adults,
+                currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
+            )
+            time.sleep(1.0)
+
+            ow_ret = sources.search_duffel_oneway(
+                origin=best.destination, destination=alt_orig,
+                dep_date=best.return_date, adults=cfg.adults,
+                currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
+            )
+            time.sleep(1.0)
+
+            if ow_out and ow_ret:
+                out_eur = _to_eur(ow_out, rates)
+                ret_eur = _to_eur(ow_ret, rates)
+                if out_eur and ret_eur:
+                    total = out_eur + ret_eur
+                    if total < best_oj_total:
+                        best_oj_total = total
+                        best_oj = {
+                            "type": "open_jaw",
+                            "rt_price": rt_eur,
+                            "oj_out_origin": best.origin,
+                            "oj_out_dest": best.destination,
+                            "oj_out_price": out_eur,
+                            "oj_out_airlines": ow_out.airlines,
+                            "oj_ret_origin": best.destination,
+                            "oj_ret_dest": alt_orig,
+                            "oj_ret_price": ret_eur,
+                            "oj_ret_airlines": ow_ret.airlines,
+                            "oj_total": total,
+                            "saving": rt_eur - total,
+                        }
+        except Exception as e:
+            print(f"  Open-jaw retour {best.destination}→{alt_orig} error: {e}")
+
+    if best_oj:
+        saving = best_oj["saving"]
+        if saving > 0:
+            print(f"  Open-jaw = {best_oj_total:.0f}€ vs RT {rt_eur:.0f}€ "
+                  f"→ économie {saving:.0f}€")
+        else:
+            print(f"  Open-jaw = {best_oj_total:.0f}€ vs RT {rt_eur:.0f}€ "
+                  f"→ RT moins cher")
+    else:
+        print("  Open-jaw: aucune combinaison trouvée")
+
+    return best_oj
 
 
 def _build_cross_checks(cfg: Config, best: sources.FlightResult,

@@ -72,8 +72,7 @@ MIGRATIONS: list[tuple[int, str]] = [
             error TEXT
         );
     """),
-    # Pour ajouter une migration future :
-    # (2, "ALTER TABLE checks ADD COLUMN new_col TEXT;"),
+    (2, "ALTER TABLE state ADD COLUMN flash_until TEXT;"),
 ]
 
 
@@ -182,7 +181,7 @@ def get_state(c: sqlite3.Connection, trip: str) -> dict[str, Any] | None:
 _VALID_STATE_COLS = frozenset({
     "lowest_price_eur", "lowest_seen_date", "lowest_origin",
     "lowest_destination", "lowest_booking_url", "rolling_json",
-    "last_check_at",
+    "last_check_at", "flash_until",
 })
 
 
@@ -256,6 +255,52 @@ def percentile_rank(c: sqlite3.Connection, trip: str,
     # Percentile rank formula: (below + 0.5 * equal) / total * 100
     rank = (below + 0.5 * equal) / len(prices) * 100
     return round(rank, 1)
+
+
+# ── Heatmap / stats / trend ──────────────────────────────────────
+
+def heatmap_data(c: sqlite3.Connection, trip: str) -> list[dict]:
+    """Best price per (outbound_date, return_date) combo."""
+    rows = c.execute("""
+        SELECT outbound_date, return_date, MIN(price_eur) AS best_eur,
+               GROUP_CONCAT(DISTINCT airlines) AS airlines
+        FROM checks
+        WHERE trip_name = ? AND price_eur IS NOT NULL
+          AND source NOT LIKE '%_ow'
+        GROUP BY outbound_date, return_date
+        ORDER BY outbound_date, return_date
+    """, (trip,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def day_of_week_stats(c: sqlite3.Connection, trip: str) -> list[dict]:
+    """Average price by day of week of check_date."""
+    rows = c.execute("""
+        SELECT CAST(strftime('%w', check_date) AS INTEGER) AS dow,
+               AVG(price_eur) AS avg_price, COUNT(*) AS n
+        FROM checks
+        WHERE trip_name = ? AND price_eur IS NOT NULL
+          AND source NOT LIKE '%_ow' AND source NOT LIKE '%_th'
+        GROUP BY dow
+        ORDER BY dow
+    """, (trip,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def price_trend(c: sqlite3.Connection, trip: str,
+                days: int = 7) -> list[tuple[str, float]]:
+    """Returns list of (date, min_price) for last N days for trend calculation."""
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    rows = c.execute("""
+        SELECT check_date, MIN(price_eur) AS min_price
+        FROM checks
+        WHERE trip_name = ? AND price_eur IS NOT NULL
+          AND source NOT LIKE '%_ow' AND source NOT LIKE '%_th'
+          AND check_date >= ?
+        GROUP BY check_date
+        ORDER BY check_date
+    """, (trip, cutoff)).fetchall()
+    return [(r[0], r[1]) for r in rows]
 
 
 # ── Queries for the API ──────────────────────────────────────────

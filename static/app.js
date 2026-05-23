@@ -19,6 +19,23 @@ const esc = (s) => {
 
 let tripChart = null;
 
+// ── Color interpolation helper ─────────────────────
+function lerpColor(a, b, t) {
+  // a, b are hex strings like "#00714c", t is 0..1
+  const ar = parseInt(a.slice(1,3),16), ag = parseInt(a.slice(3,5),16), ab = parseInt(a.slice(5,7),16);
+  const br = parseInt(b.slice(1,3),16), bg_ = parseInt(b.slice(3,5),16), bb = parseInt(b.slice(5,7),16);
+  const r = Math.round(ar + (br - ar) * t);
+  const g = Math.round(ag + (bg_ - ag) * t);
+  const bl = Math.round(ab + (bb - ab) * t);
+  return `rgb(${r},${g},${bl})`;
+}
+
+function scoreColor(score) {
+  // 0=red, 50=orange, 100=green
+  if (score <= 50) return lerpColor('#d35b17', '#c2a25b', score / 50);
+  return lerpColor('#c2a25b', '#00714c', (score - 50) / 50);
+}
+
 // ── Tabs ─────────────────────────────────────────────
 
 $$('.tabs button').forEach(b => {
@@ -121,11 +138,15 @@ async function loadOverview() {
   if (prev) sel.value = prev;
 
   trips.forEach(t => grid.appendChild(buildTripCard(t)));
+
+  // Load stats indicators async for each card
+  trips.forEach(t => loadCardIndicators(t.trip_name));
 }
 
 function buildTripCard(t) {
   const card = document.createElement('div');
   card.className = 'trip-card' + (t.current_best === null ? ' no-data' : '');
+  card.dataset.trip = t.trip_name;
   card.addEventListener('click', () => {
     $('#trip-select').value = t.trip_name;
     $$('.tabs button').forEach(b => {
@@ -160,6 +181,10 @@ function buildTripCard(t) {
         <span class="target">≤ ${t.threshold}€</span>
       </div>
     ` : ''}
+    <div class="card-indicators">
+      <span class="trend-badge"></span>
+      <span class="score-badge"></span>
+    </div>
   `;
   return card;
 }
@@ -257,6 +282,264 @@ async function loadTripDetail() {
   });
   if (!breakdown.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="dim">Pas encore de données.</td></tr>';
+  }
+
+  // Heatmap
+  loadHeatmap(name);
+
+  // Stats
+  loadTripStats(name);
+}
+
+// ── Heatmap ────────────────────────────────────────
+
+async function loadHeatmap(tripName) {
+  const container = $('#heatmap-grid');
+  container.innerHTML = '';
+  try {
+    const data = await fetch(`/api/trips/${encodeURIComponent(tripName)}/heatmap`).then(r => {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    });
+
+    if (!data || !data.outbound_dates || !data.return_dates || !data.prices
+        || !data.outbound_dates.length || !data.return_dates.length) {
+      container.innerHTML = '<div class="hm-no-data">Pas de données</div>';
+      return;
+    }
+
+    const outDates = data.outbound_dates;
+    const retDates = data.return_dates;
+    const prices = data.prices; // 2D array: prices[outIdx][retIdx]
+
+    // Find min/max for color scale
+    let allPrices = [];
+    let minPrice = Infinity, maxPrice = -Infinity;
+    let minOut = -1, minRet = -1;
+    for (let i = 0; i < outDates.length; i++) {
+      for (let j = 0; j < retDates.length; j++) {
+        const p = prices[i] && prices[i][j];
+        if (p != null && p > 0) {
+          allPrices.push(p);
+          if (p < minPrice) { minPrice = p; minOut = i; minRet = j; }
+          if (p > maxPrice) maxPrice = p;
+        }
+      }
+    }
+
+    if (!allPrices.length) {
+      container.innerHTML = '<div class="hm-no-data">Pas de données</div>';
+      return;
+    }
+
+    const range = maxPrice - minPrice || 1;
+
+    // Build table
+    const table = document.createElement('table');
+    table.className = 'hm-table';
+
+    // Header row: corner + return dates
+    const thead = document.createElement('thead');
+    let headerRow = '<tr><th class="hm-corner">Aller \\ Retour</th>';
+    retDates.forEach(d => {
+      headerRow += `<th class="hm-col-header">${esc(dateFmt(d))}</th>`;
+    });
+    headerRow += '</tr>';
+    thead.innerHTML = headerRow;
+    table.appendChild(thead);
+
+    // Body rows: outbound date + cells
+    const tbody = document.createElement('tbody');
+    for (let i = 0; i < outDates.length; i++) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<th class="hm-row-header">${esc(dateFmt(outDates[i]))}</th>`;
+      for (let j = 0; j < retDates.length; j++) {
+        const td = document.createElement('td');
+        const p = prices[i] && prices[i][j];
+        if (p != null && p > 0) {
+          const t = (p - minPrice) / range; // 0=cheapest(green), 1=most expensive(orange)
+          const bg = lerpColor('#00714c', '#d35b17', t);
+          td.className = 'hm-cell';
+          td.style.backgroundColor = bg;
+          td.textContent = Math.round(p) + '\u202F\u20AC';
+          td.title = dateFmt(outDates[i]) + ' \u2192 ' + dateFmt(retDates[j]) + ' : ' + Math.round(p) + '\u202F\u20AC';
+          if (i === minOut && j === minRet) {
+            td.classList.add('hm-cheapest');
+          }
+        } else {
+          td.className = 'hm-cell hm-empty';
+          td.textContent = '\u2014';
+        }
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    container.appendChild(table);
+  } catch (e) {
+    container.innerHTML = '<div class="hm-no-data">Pas de données</div>';
+  }
+}
+
+// ── Trip stats ─────────────────────────────────────
+
+const DAY_NAMES = ['dim', 'lun', 'mar', 'mer', 'jeu', 'ven', 'sam'];
+
+async function loadTripStats(tripName) {
+  const container = $('#stats-content');
+  container.innerHTML = '';
+  try {
+    const stats = await fetch(`/api/trips/${encodeURIComponent(tripName)}/stats`).then(r => {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    });
+
+    if (!stats || (stats.trend == null && stats.buy_score == null && !stats.day_of_week)) {
+      container.innerHTML = '<div class="stats-no-data">Pas de données statistiques disponibles.</div>';
+      return;
+    }
+
+    let html = '<div class="stats-grid">';
+
+    // Trend
+    if (stats.trend != null) {
+      let arrow, text, cls;
+      if (stats.trend === 'falling' || stats.trend < 0) {
+        arrow = '\u2198'; text = 'en baisse'; cls = 'falling';
+      } else if (stats.trend === 'rising' || stats.trend > 0) {
+        arrow = '\u2197'; text = 'en hausse'; cls = 'rising';
+      } else {
+        arrow = '\u2192'; text = 'stable'; cls = 'stable';
+      }
+      html += `
+        <div class="stats-trend">
+          <span class="trend-arrow" style="color:${cls === 'falling' ? 'var(--green)' : cls === 'rising' ? 'var(--rose)' : 'var(--text-dim)'}">${arrow}</span>
+          <div>
+            <div class="trend-text">Tendance : <strong>${esc(text)}</strong></div>
+            ${stats.recommendation ? `<div class="dim" style="font-size:0.75rem;margin-top:0.15rem">${esc(stats.recommendation)}</div>` : ''}
+          </div>
+        </div>`;
+    }
+
+    // Buy score
+    if (stats.buy_score != null) {
+      const score = Math.max(0, Math.min(100, Math.round(stats.buy_score)));
+      const color = scoreColor(score);
+      html += `
+        <div class="stats-score">
+          <div class="dim" style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em">Score d'achat</div>
+          <div class="score-bar-wrap">
+            <div class="score-bar-track">
+              <div class="score-bar-fill" style="width:${score}%;background:${color}"></div>
+            </div>
+            <span class="score-label" style="color:${color}">${score}/100</span>
+          </div>
+        </div>`;
+    }
+
+    // Day of week chart
+    if (stats.day_of_week && Object.keys(stats.day_of_week).length) {
+      const dow = stats.day_of_week; // object like {0: avg, 1: avg, ...} or {dim: avg, ...}
+      // Normalize to array of 7 values
+      let values = [];
+      if (Array.isArray(dow)) {
+        values = dow.map(v => v != null ? v : null);
+      } else {
+        // Could be keyed by day index (0-6) or by name
+        for (let i = 0; i < 7; i++) {
+          const v = dow[i] ?? dow[String(i)] ?? dow[DAY_NAMES[i]] ?? null;
+          values.push(v);
+        }
+      }
+
+      const validValues = values.filter(v => v != null && v > 0);
+      if (validValues.length) {
+        const maxVal = Math.max(...validValues);
+        const minVal = Math.min(...validValues);
+        const cheapestIdx = values.indexOf(minVal);
+
+        html += `<div class="stats-dow">
+          <div class="dow-title">Prix moyen par jour de la semaine</div>
+          <div class="dow-chart">`;
+        for (let i = 0; i < 7; i++) {
+          const v = values[i];
+          if (v != null && v > 0) {
+            const pct = maxVal > 0 ? Math.max(10, (v / maxVal) * 100) : 10;
+            const isCheapest = i === cheapestIdx;
+            const barColor = isCheapest ? 'var(--green)' : 'var(--gold)';
+            html += `
+              <div class="dow-bar-wrap">
+                <div class="dow-price">${Math.round(v)}\u202F\u20AC</div>
+                <div class="dow-bar${isCheapest ? ' dow-cheapest' : ''}" style="height:${pct}%;background:${barColor}"></div>
+                <div class="dow-label">${DAY_NAMES[i]}</div>
+              </div>`;
+          } else {
+            html += `
+              <div class="dow-bar-wrap">
+                <div class="dow-price">\u2014</div>
+                <div class="dow-bar" style="height:10%;background:var(--bg-elev)"></div>
+                <div class="dow-label">${DAY_NAMES[i]}</div>
+              </div>`;
+          }
+        }
+        html += '</div></div>';
+      }
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = '<div class="stats-no-data">Pas de données statistiques disponibles.</div>';
+  }
+}
+
+// ── Card indicators (overview) ────────────────────
+
+async function loadCardIndicators(tripName) {
+  try {
+    const stats = await fetch(`/api/trips/${encodeURIComponent(tripName)}/stats`).then(r => {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    });
+
+    const card = document.querySelector(`.trip-card[data-trip="${CSS.escape(tripName)}"]`);
+    if (!card) return;
+
+    const trendBadge = card.querySelector('.trend-badge');
+    const scoreBadge = card.querySelector('.score-badge');
+
+    // Trend badge
+    if (stats && stats.trend != null && trendBadge) {
+      let arrow, text, cls;
+      if (stats.trend === 'falling' || stats.trend < 0) {
+        arrow = '\u2198'; text = 'en baisse'; cls = 'falling';
+      } else if (stats.trend === 'rising' || stats.trend > 0) {
+        arrow = '\u2197'; text = 'en hausse'; cls = 'rising';
+      } else {
+        arrow = '\u2192'; text = 'stable'; cls = 'stable';
+      }
+      trendBadge.className = 'trend-badge ' + cls;
+      trendBadge.textContent = arrow + ' ' + text;
+    } else if (trendBadge) {
+      trendBadge.style.display = 'none';
+    }
+
+    // Score badge
+    if (stats && stats.buy_score != null && scoreBadge) {
+      const score = Math.max(0, Math.min(100, Math.round(stats.buy_score)));
+      const color = scoreColor(score);
+      scoreBadge.style.backgroundColor = color;
+      scoreBadge.textContent = 'Score ' + score + '/100';
+    } else if (scoreBadge) {
+      scoreBadge.style.display = 'none';
+    }
+  } catch (e) {
+    // Stats not available — hide indicators silently
+    const card = document.querySelector(`.trip-card[data-trip="${CSS.escape(tripName)}"]`);
+    if (card) {
+      const indicators = card.querySelector('.card-indicators');
+      if (indicators) indicators.style.display = 'none';
+    }
   }
 }
 

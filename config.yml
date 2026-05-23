@@ -4,7 +4,7 @@
 # ═══════════════════════════════════════════════════════════════
 
 # Aéroports de départ
-origins: [CDG, LYS, BSL, GVA]
+origins: [CDG, LYS, BSL, GVA, MXP]
 
 # Destinations Thaïlande
 # BKK Suvarnabhumi, HKT Phuket, CNX Chiang Mai

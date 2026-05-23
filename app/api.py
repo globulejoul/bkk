@@ -5,6 +5,8 @@ Routes:
   /api/trips   -> trip summaries
   /api/trips/{name}/history -> daily best
   /api/trips/{name}/breakdown -> per origin/destination
+  /api/trips/{name}/heatmap -> heatmap data
+  /api/trips/{name}/stats -> trend + buy score + DOW stats
   /api/alerts  -> recent alerts
   /api/runs    -> last runs
   /api/run-now -> trigger immediate check (POST)
@@ -13,10 +15,12 @@ from __future__ import annotations
 
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -58,6 +62,56 @@ def _cleanup_stale_runs() -> None:
             print(f"Cleaned up {stale} stale run(s)")
 
 
+def _flash_check() -> None:
+    """Check if any trip is in flash mode and trigger a lightweight check."""
+    if _run_lock.locked():
+        return
+    now_iso = datetime.now().isoformat()
+    trips_in_flash: list[str] = []
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT trip_name, flash_until FROM state "
+            "WHERE flash_until IS NOT NULL AND flash_until > ?",
+            (now_iso,),
+        ).fetchall()
+        trips_in_flash = [r[0] for r in rows]
+
+    if not trips_in_flash:
+        return
+
+    print(f"Flash mode: {len(trips_in_flash)} trip(s) en flash — "
+          f"{', '.join(trips_in_flash)}")
+
+    if not _run_lock.acquire(blocking=False):
+        return
+    try:
+        from app import fx, sources
+        cfg = config.load()
+        rates = fx.fetch_rates(cfg.currency, ["THB"])
+        by_name = {t.name: t for t in cfg.trips}
+        for trip_name in trips_in_flash:
+            trip = by_name.get(trip_name)
+            if not trip:
+                continue
+            # Lightweight check: Duffel only, mid-date only
+            out_mid = sources.mid_date(trip.outbound_window)
+            ret_mid = sources.mid_date(trip.return_window)
+            print(f"  Flash check {trip_name}: Duffel {out_mid}/{ret_mid}")
+            results = sources.search_duffel(
+                origins=cfg.origins, destinations=cfg.destinations,
+                outbound_dates=[out_mid], return_dates=[ret_mid],
+                adults=cfg.adults, currency=cfg.currency,
+                max_fly_h=cfg.max_fly_duration_hours,
+            )
+            if results:
+                print(f"  Flash {trip_name}: {len(results)} résultats, "
+                      f"best {results[0].price} {results[0].currency}")
+    except Exception as e:
+        print(f"Flash check error: {e}")
+    finally:
+        _run_lock.release()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global scheduler
@@ -68,8 +122,11 @@ async def lifespan(app: FastAPI):
     trigger = CronTrigger.from_crontab(cfg.schedule_cron)
     scheduler.add_job(_run_safe, trigger, id="watcher",
                       max_instances=1, coalesce=True)
+    # Flash mode: vérification toutes les 5 minutes
+    scheduler.add_job(_flash_check, IntervalTrigger(minutes=5),
+                      id="flash_check", max_instances=1, coalesce=True)
     scheduler.start()
-    print(f"Scheduler started: {cfg.schedule_cron}")
+    print(f"Scheduler started: {cfg.schedule_cron} + flash every 5min")
     yield
     if scheduler:
         scheduler.shutdown(wait=False)
@@ -126,6 +183,44 @@ async def get_trip_history(name: str, days: int = 60):
 async def get_trip_breakdown(name: str):
     with db.conn() as c:
         return db.trip_breakdown(c, name)
+
+
+@app.get("/api/trips/{name}/heatmap")
+async def get_trip_heatmap(name: str):
+    with db.conn() as c:
+        return db.heatmap_data(c, name)
+
+
+@app.get("/api/trips/{name}/stats")
+async def get_trip_stats(name: str):
+    cfg = config.load()
+    by_name = {t.name: t for t in cfg.trips}
+    trip = by_name.get(name)
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    with db.conn() as c:
+        dow_stats = db.day_of_week_stats(c, name)
+        trend_data = db.price_trend(c, name, days=7)
+        trend = watcher._calc_trend(trend_data)
+
+        # Compute buy score from current state
+        state = db.get_state(c, name)
+        buy_score = None
+        if state and state.get("lowest_price_eur") is not None:
+            current_price = state["lowest_price_eur"]
+            pct = db.percentile_rank(c, name, current_price)
+            from app import fx
+            rates = fx.fetch_rates(cfg.currency, ["THB"])
+            buy_score = watcher._calc_buy_score(
+                current_price, trip, cfg, rates, pct, trend,
+            )
+
+    return {
+        "day_of_week": dow_stats,
+        "trend": trend,
+        "buy_score": buy_score,
+    }
 
 
 @app.get("/api/alerts")
