@@ -93,6 +93,8 @@ async def get_trips():
                 "outbound_window": t.outbound_window,
                 "return_window": t.return_window,
             })
+    # Sort by outbound date
+    summary.sort(key=lambda s: s.get("outbound_window", ["9999"])[0])
     return summary
 
 
