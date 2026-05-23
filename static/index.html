@@ -27,6 +27,7 @@
   <button data-tab="overview" class="active">Vue d'ensemble</button>
   <button data-tab="trip">Détail période</button>
   <button data-tab="alerts">Alertes</button>
+  <button data-tab="infos">Infos</button>
   <button data-tab="runs">Logs</button>
 </nav>
 
@@ -68,6 +69,22 @@
     <div id="alerts-list"></div>
   </section>
 
+  <!-- INFOS -->
+  <section id="tab-infos" class="tab">
+    <div class="infos-grid">
+      <div class="info-card">
+        <h2>Bangkok <span class="dim">7 jours</span></h2>
+        <div id="weather-current" class="weather-now"></div>
+        <div class="chart-wrap"><canvas id="weather-chart"></canvas></div>
+      </div>
+      <div class="info-card">
+        <h2>EUR / THB <span class="dim">6 mois</span></h2>
+        <div id="fx-current" class="fx-now"></div>
+        <div class="chart-wrap"><canvas id="fx-chart"></canvas></div>
+      </div>
+    </div>
+  </section>
+
   <!-- RUNS -->
   <section id="tab-runs" class="tab">
     <h2>Derniers runs</h2>
@@ -83,9 +100,6 @@
   </section>
 </main>
 
-<footer>
-  <span>flight-watcher v4 • <a href="https://github.com" target="_blank">source</a></span>
-</footer>
 
 <script src="/static/app.js"></script>
 </body>

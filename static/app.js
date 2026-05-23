@@ -22,6 +22,7 @@ $$('.tabs button').forEach(b => {
     $('#tab-' + b.dataset.tab).classList.add('active');
     if (b.dataset.tab === 'trip') loadTripDetail();
     if (b.dataset.tab === 'alerts') loadAlerts();
+    if (b.dataset.tab === 'infos') loadInfos();
     if (b.dataset.tab === 'runs') loadRuns();
   });
 });
@@ -295,6 +296,135 @@ async function loadRuns() {
       </tr>
     `;
   });
+}
+
+// ── Infos (weather + FX) ─────────────────────────────
+
+let weatherChart = null;
+let fxChart = null;
+
+async function loadInfos() {
+  loadWeather();
+  loadFx();
+}
+
+async function loadWeather() {
+  try {
+    const r = await fetch(
+      'https://api.open-meteo.com/v1/forecast?latitude=13.75&longitude=100.52' +
+      '&daily=temperature_2m_max,temperature_2m_min,weathercode' +
+      '&current=temperature_2m,weathercode' +
+      '&timezone=Asia/Bangkok&forecast_days=7'
+    );
+    const data = await r.json();
+    const cur = data.current || {};
+    const daily = data.daily || {};
+
+    const icon = weatherIcon(cur.weathercode);
+    $('#weather-current').innerHTML = `
+      <div><span class="temp-big">${icon} ${Math.round(cur.temperature_2m)}°C</span></div>
+      <div>Bangkok maintenant</div>
+    `;
+
+    const ctx = $('#weather-chart').getContext('2d');
+    if (weatherChart) weatherChart.destroy();
+    weatherChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: (daily.time || []).map(d => new Date(d).toLocaleDateString('fr-FR', {weekday: 'short', day: 'numeric'})),
+        datasets: [
+          {
+            label: 'Max °C',
+            data: daily.temperature_2m_max || [],
+            backgroundColor: '#d35b17aa',
+            borderRadius: 4,
+          },
+          {
+            label: 'Min °C',
+            data: daily.temperature_2m_min || [],
+            backgroundColor: '#00714caa',
+            borderRadius: 4,
+          },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#464d2c', font: { family: 'JetBrains Mono', size: 11 } } } },
+        scales: {
+          x: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 10 }, callback: v => v + '°' }, grid: { color: '#cfcdcb' } },
+        },
+      },
+    });
+  } catch (e) {
+    $('#weather-current').textContent = 'Erreur chargement météo';
+  }
+}
+
+function weatherIcon(code) {
+  if (code == null) return '';
+  if (code <= 1) return '☀️';
+  if (code <= 3) return '⛅';
+  if (code <= 48) return '☁️';
+  if (code <= 67) return '🌧️';
+  if (code <= 77) return '🌨️';
+  if (code <= 82) return '🌧️';
+  if (code <= 86) return '🌨️';
+  return '⛈️';
+}
+
+async function loadFx() {
+  try {
+    const end = new Date().toISOString().slice(0, 10);
+    const start = new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10);
+    const r = await fetch(
+      `https://api.frankfurter.app/${start}..${end}?from=EUR&to=THB`
+    );
+    const data = await r.json();
+    const dates = Object.keys(data.rates).sort();
+    const rates = dates.map(d => data.rates[d].THB);
+    const latest = rates[rates.length - 1];
+    const oldest = rates[0];
+    const diff = ((latest / oldest - 1) * 100).toFixed(1);
+    const sign = diff >= 0 ? '+' : '';
+
+    $('#fx-current').innerHTML = `
+      <div><span class="rate-big">1€ = ${latest.toFixed(2)} ฿</span></div>
+      <div>${sign}${diff}% sur 6 mois</div>
+    `;
+
+    const ctx = $('#fx-chart').getContext('2d');
+    if (fxChart) fxChart.destroy();
+    fxChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: dates,
+        datasets: [{
+          label: 'EUR/THB',
+          data: rates,
+          borderColor: '#c2a25b',
+          backgroundColor: '#c2a25b18',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { type: 'time', time: { unit: 'month' },
+               ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 10 }, maxTicksLimit: 6 },
+               grid: { display: false } },
+          y: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 10 }, callback: v => v + '฿' },
+               grid: { color: '#cfcdcb' } },
+        },
+      },
+    });
+  } catch (e) {
+    $('#fx-current').textContent = 'Erreur chargement taux de change';
+  }
 }
 
 // ── Init ─────────────────────────────────────────────

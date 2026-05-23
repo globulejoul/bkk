@@ -341,16 +341,46 @@ tbody tr:hover { background: var(--bg-elev); }
   color: var(--text-dim);
 }
 
-/* ── Footer ─────────────────────────────────────────── */
 
-footer {
-  max-width: 1400px;
-  margin: 3rem auto 1.5rem;
-  padding: 1rem 2rem;
-  text-align: center;
+/* ── Infos grid ─────────────────────────────────────── */
+
+.infos-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+@media (max-width: 768px) {
+  .infos-grid { grid-template-columns: 1fr; }
+}
+
+.info-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+.info-card .chart-wrap {
+  position: relative;
+  height: 220px;
+}
+.info-card canvas {
+  max-height: 220px;
+}
+
+.weather-now, .fx-now {
   font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--text-faint);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 1rem;
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+.weather-now .temp-big, .fx-now .rate-big {
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--text);
 }
 
 /* ── Tables responsive ──────────────────────────────── */
@@ -438,8 +468,6 @@ footer {
   .alert-meta { font-size: 0.65rem; word-break: break-word; }
 
   h2 { font-size: 1.25rem; }
-
-  footer { margin: 1.5rem auto 1rem; padding: 0.75rem 1rem; }
 }
 
 @media (max-width: 380px) {
