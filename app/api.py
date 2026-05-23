@@ -148,6 +148,18 @@ async def run_now():
     return {"status": "started"}
 
 
+@app.get("/api/config-summary")
+async def config_summary():
+    cfg = config.load()
+    return {
+        "origins": cfg.origins,
+        "destinations": cfg.destinations,
+        "adults": cfg.adults,
+        "max_fly_duration_hours": cfg.max_fly_duration_hours,
+        "schedule_cron": cfg.schedule_cron,
+    }
+
+
 @app.get("/api/fx-history")
 async def fx_history(months: int = 6):
     """EUR/THB history proxied to avoid CORS."""

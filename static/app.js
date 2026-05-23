@@ -434,4 +434,27 @@ async function loadFx() {
 // ── Init ─────────────────────────────────────────────
 
 loadOverview();
-setInterval(loadOverview, 60000); // refresh every minute
+loadIntro();
+setInterval(loadOverview, 60000);
+
+async function loadIntro() {
+  try {
+    const cfg = await fetch('/api/config-summary').then(r => r.json());
+    const cron = parseCron(cfg.schedule_cron);
+    const pax = cfg.adults === 1 ? '1 personne' : cfg.adults + ' personnes';
+    $('#intro').textContent =
+      `Check auto ${cron} pour ${pax} · ` +
+      `Départs ${cfg.origins.join(', ')} → ${cfg.destinations.join(', ')} · ` +
+      `Vols < ${cfg.max_fly_duration_hours}h`;
+  } catch(e) {}
+}
+
+function parseCron(expr) {
+  if (!expr) return '';
+  const parts = expr.split(' ');
+  const min = parts[0], hour = parts[1];
+  if (hour.includes(',')) return `${hour.split(',').length}x/jour (${hour.replace(/,/g,'h, ')}h)`;
+  if (hour.includes('*/')) return `toutes les ${hour.replace('*/','')}h`;
+  if (hour === '*') return 'toutes les heures';
+  return `à ${hour}h${min !== '0' ? min : ''}`;
+}

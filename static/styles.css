@@ -342,6 +342,21 @@ tbody tr:hover { background: var(--bg-elev); }
 }
 
 
+/* ── Intro ──────────────────────────────────────────── */
+
+.intro {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0.75rem 2rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+@media (max-width: 768px) {
+  .intro { padding: 0.5rem 0.75rem; font-size: 0.65rem; }
+}
+
 /* ── Infos grid ─────────────────────────────────────── */
 
 .infos-grid {
