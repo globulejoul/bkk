@@ -43,7 +43,8 @@ def _run_safe() -> None:
     if not _run_lock.acquire(blocking=False):
         print("Skip: previous run still in progress")
         return
-    _run_started_at = datetime.now()
+    run_token = datetime.now()
+    _run_started_at = run_token
     try:
         cfg = config.load()
         result = watcher.run_once(cfg)
@@ -51,8 +52,14 @@ def _run_safe() -> None:
     except Exception as e:
         print(f"Run error: {e}")
     finally:
-        _run_started_at = None
-        _run_lock.release()
+        # Ne release que si c'est toujours NOTRE run
+        # (le watchdog a pu release + un autre run a pu prendre le lock)
+        if _run_started_at is run_token:
+            _run_started_at = None
+            try:
+                _run_lock.release()
+            except RuntimeError:
+                pass
 
 
 def _cleanup_stale_runs() -> None:
@@ -272,8 +279,23 @@ async def get_runs(limit: int = 10):
 
 @app.post("/api/run-now")
 async def run_now():
+    global _run_started_at
     if _run_lock.locked():
-        return JSONResponse({"status": "already_running"}, status_code=409)
+        # Vérifier si un run est vraiment en cours en base
+        with db.conn() as c:
+            row = c.execute(
+                "SELECT id FROM run_log WHERE status='running' LIMIT 1"
+            ).fetchone()
+        if not row:
+            # Lock fantôme : aucun run en cours en base, on force le reset
+            print("run-now: lock fantôme détecté, reset forcé")
+            _run_started_at = None
+            try:
+                _run_lock.release()
+            except RuntimeError:
+                pass
+        else:
+            return JSONResponse({"status": "already_running"}, status_code=409)
     threading.Thread(target=_run_safe, daemon=True).start()
     return {"status": "started"}
 

@@ -103,7 +103,7 @@ $('#run-now').addEventListener('click', async () => {
   btn.disabled = true;
   const r = await fetch('/api/run-now', { method: 'POST' });
   if (r.status === 409) {
-    alert('Un check est déjà en cours.');
+    btn.textContent = 'Check en cours...';
     startPolling(null);
     return;
   }
