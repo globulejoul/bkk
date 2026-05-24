@@ -886,18 +886,18 @@ function renderTrips() {
     card.innerHTML = `
       <div class="trip-edit-name">${esc(trip.name)}</div>
       <div class="trip-edit-row">
-        <label>Aller du</label>
-        <input type="date" data-trip="${idx}" data-field="ow0" value="${ow[0]}">
-        <input type="date" data-trip="${idx}" data-field="ow1" value="${ow[1]}">
+        <label for="trip-${idx}-ow0">Aller du</label>
+        <input type="date" id="trip-${idx}-ow0" name="trip-${idx}-ow0" data-trip="${idx}" data-field="ow0" value="${ow[0]}">
+        <input type="date" id="trip-${idx}-ow1" name="trip-${idx}-ow1" data-trip="${idx}" data-field="ow1" value="${ow[1]}">
       </div>
       <div class="trip-edit-row">
-        <label>Retour du</label>
-        <input type="date" data-trip="${idx}" data-field="rw0" value="${rw[0]}">
-        <input type="date" data-trip="${idx}" data-field="rw1" value="${rw[1]}">
+        <label for="trip-${idx}-rw0">Retour du</label>
+        <input type="date" id="trip-${idx}-rw0" name="trip-${idx}-rw0" data-trip="${idx}" data-field="rw0" value="${rw[0]}">
+        <input type="date" id="trip-${idx}-rw1" name="trip-${idx}-rw1" data-trip="${idx}" data-field="rw1" value="${rw[1]}">
       </div>
       <div class="trip-edit-row">
-        <label>Seuil alerte</label>
-        <input type="number" data-trip="${idx}" data-field="threshold" value="${trip.price_threshold || ''}" placeholder="ex: 800">
+        <label for="trip-${idx}-threshold">Seuil alerte</label>
+        <input type="number" id="trip-${idx}-threshold" name="trip-${idx}-threshold" data-trip="${idx}" data-field="threshold" value="${trip.price_threshold || ''}" placeholder="ex: 800">
         <span class="dim" style="font-size:0.75rem">\u20ac</span>
       </div>
     `;
