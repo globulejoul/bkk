@@ -1,6 +1,7 @@
 .env
 CLAUDE.md
 .claude/
+config.yml
 data/
 __pycache__/
 *.pyc
