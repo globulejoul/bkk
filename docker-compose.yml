@@ -9,7 +9,7 @@ services:
       NTFY_TOKEN: ${NTFY_TOKEN:-}
       TZ: Europe/Paris
     volumes:
-      - ./config.yml:/app/config.yml:ro
+      - ./config.yml:/app/config.yml
       - ./data:/app/data
     ports:
       - "127.0.0.1:8080:8080"
