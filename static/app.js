@@ -141,8 +141,11 @@ async function loadOverview() {
 
   trips.forEach(t => grid.appendChild(buildTripCard(t)));
 
-  // Load stats indicators async for each card
-  trips.forEach(t => loadCardIndicators(t.trip_name));
+  // Load sparklines + stats indicators async for each card
+  trips.forEach(t => {
+    loadCardSparkline(t.trip_name);
+    loadCardIndicators(t.trip_name);
+  });
 }
 
 function buildTripCard(t) {
@@ -183,12 +186,81 @@ function buildTripCard(t) {
         <span class="target">≤ ${t.threshold}€</span>
       </div>
     ` : ''}
+    <div class="sparkline-wrap"><canvas class="sparkline"></canvas></div>
     <div class="card-indicators">
       <span class="trend-badge"></span>
       <span class="score-badge"></span>
     </div>
   `;
   return card;
+}
+
+// ── Sparklines (overview cards) ─────────────────────
+
+async function loadCardSparkline(tripName) {
+  try {
+    const history = await fetch(`/api/trips/${encodeURIComponent(tripName)}/history?days=30`).then(r => {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    });
+    if (!history || history.length < 2) return;
+
+    const card = document.querySelector(`.trip-card[data-trip="${CSS.escape(tripName)}"]`);
+    if (!card) return;
+    const canvas = card.querySelector('.sparkline');
+    if (!canvas) return;
+
+    const prices = history.map(h => h.price_eur);
+    const min = Math.min(...prices);
+    const max = Math.max(...prices);
+    const range = max - min || 1;
+
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width = canvas.offsetWidth * 2;
+    const h = canvas.height = canvas.offsetHeight * 2;
+    ctx.scale(2, 2);
+    const cw = w / 2, ch = h / 2;
+    const pad = 2;
+
+    // Fill gradient
+    const grad = ctx.createLinearGradient(0, 0, 0, ch);
+    grad.addColorStop(0, 'rgba(194,162,91,0.15)');
+    grad.addColorStop(1, 'rgba(194,162,91,0)');
+
+    ctx.beginPath();
+    ctx.moveTo(pad, ch - pad);
+    for (let i = 0; i < prices.length; i++) {
+      const x = pad + (i / (prices.length - 1)) * (cw - pad * 2);
+      const y = pad + (1 - (prices[i] - min) / range) * (ch - pad * 2);
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(cw - pad, ch - pad);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Line
+    ctx.beginPath();
+    for (let i = 0; i < prices.length; i++) {
+      const x = pad + (i / (prices.length - 1)) * (cw - pad * 2);
+      const y = pad + (1 - (prices[i] - min) / range) * (ch - pad * 2);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = '#c2a25b';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Last point dot
+    const lastX = cw - pad;
+    const lastY = pad + (1 - (prices[prices.length - 1] - min) / range) * (ch - pad * 2);
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#c2a25b';
+    ctx.fill();
+  } catch (e) {
+    // No sparkline data — silent
+  }
 }
 
 // ── Trip detail ─────────────────────────────────────
