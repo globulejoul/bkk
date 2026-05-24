@@ -271,16 +271,28 @@ async function loadCardSparkline(tripName) {
 
 // ── Trip detail ─────────────────────────────────────
 
+let _chartDays = 60;
+
 $('#trip-select').addEventListener('change', loadTripDetail);
+$$('#chart-period button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $$('#chart-period button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    _chartDays = parseInt(btn.dataset.days, 10);
+    loadTripDetail();
+  });
+});
 
 async function loadTripDetail() {
   const name = $('#trip-select').value;
   if (!name) return;
 
+  const daysParam = _chartDays > 0 ? `?days=${_chartDays}` : '?days=9999';
+  const enc = encodeURIComponent(name);
   const [history, routeHistory, breakdown] = await Promise.all([
-    fetch(`/api/trips/${encodeURIComponent(name)}/history`).then(r => r.json()),
-    fetch(`/api/trips/${encodeURIComponent(name)}/history-by-route`).then(r => r.json()),
-    fetch(`/api/trips/${encodeURIComponent(name)}/breakdown`).then(r => r.json()),
+    fetch(`/api/trips/${enc}/history${daysParam}`).then(r => r.json()),
+    fetch(`/api/trips/${enc}/history-by-route${daysParam}`).then(r => r.json()),
+    fetch(`/api/trips/${enc}/breakdown`).then(r => r.json()),
   ]);
 
   // Chart with one line per route
