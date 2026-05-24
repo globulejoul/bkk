@@ -47,6 +47,7 @@ $$('.tabs button').forEach(b => {
     if (b.dataset.tab === 'trip') loadTripDetail();
     if (b.dataset.tab === 'alerts') loadAlerts();
     if (b.dataset.tab === 'runs') loadRuns();
+    if (b.dataset.tab === 'admin') loadAdmin();
   });
 });
 
@@ -795,6 +796,152 @@ async function loadFx() {
     $('#fx-current').textContent = 'Erreur chargement taux de change';
   }
 }
+
+// ── Admin ──────────────────────────────────────────────
+
+let _adminConfig = null;
+
+async function loadAdmin() {
+  try {
+    _adminConfig = await fetch('/api/admin/config').then(r => r.json());
+    renderOrigins();
+    renderDestinations();
+    renderTrips();
+    $('#admin-status').textContent = '';
+  } catch (e) {
+    $('#admin-status').textContent = 'Erreur chargement config';
+  }
+}
+
+function renderOrigins() {
+  const container = $('#admin-origins');
+  container.innerHTML = '';
+  (_adminConfig.origins || []).forEach((o, i) => {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.innerHTML = `${esc(o)}<button class="tag-remove" onclick="removeOrigin(${i})">\u00d7</button>`;
+    container.appendChild(tag);
+  });
+}
+
+function renderDestinations() {
+  const container = $('#admin-destinations');
+  container.innerHTML = '';
+  (_adminConfig.destinations || []).forEach((d, i) => {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.innerHTML = `${esc(d)}<button class="tag-remove" onclick="removeDestination(${i})">\u00d7</button>`;
+    container.appendChild(tag);
+  });
+}
+
+function addOrigin() {
+  const input = $('#add-origin');
+  const val = input.value.trim().toUpperCase();
+  if (!val || val.length < 3) return;
+  if (_adminConfig.origins.includes(val)) return;
+  _adminConfig.origins.push(val);
+  renderOrigins();
+  input.value = '';
+}
+
+function removeOrigin(i) {
+  _adminConfig.origins.splice(i, 1);
+  renderOrigins();
+}
+
+function addDestination() {
+  const input = $('#add-dest');
+  const val = input.value.trim().toUpperCase();
+  if (!val || val.length < 3) return;
+  if (_adminConfig.destinations.includes(val)) return;
+  _adminConfig.destinations.push(val);
+  renderDestinations();
+  input.value = '';
+}
+
+function removeDestination(i) {
+  _adminConfig.destinations.splice(i, 1);
+  renderDestinations();
+}
+
+function renderTrips() {
+  const container = $('#admin-trips');
+  container.innerHTML = '';
+  (_adminConfig.trips || []).forEach((trip, idx) => {
+    const card = document.createElement('div');
+    card.className = 'trip-edit-card';
+    const ow = trip.outbound_window || ['', ''];
+    const rw = trip.return_window || ['', ''];
+    card.innerHTML = `
+      <div class="trip-edit-name">${esc(trip.name)}</div>
+      <div class="trip-edit-row">
+        <label>Aller du</label>
+        <input type="date" value="${ow[0]}" onchange="updateTrip(${idx},'ow0',this.value)">
+        <input type="date" value="${ow[1]}" onchange="updateTrip(${idx},'ow1',this.value)">
+      </div>
+      <div class="trip-edit-row">
+        <label>Retour du</label>
+        <input type="date" value="${rw[0]}" onchange="updateTrip(${idx},'rw0',this.value)">
+        <input type="date" value="${rw[1]}" onchange="updateTrip(${idx},'rw1',this.value)">
+      </div>
+      <div class="trip-edit-row">
+        <label>Seuil alerte</label>
+        <input type="number" value="${trip.price_threshold || ''}" placeholder="ex: 800"
+               onchange="updateTrip(${idx},'threshold',this.value)">
+        <span class="dim" style="font-size:0.75rem">\u20ac</span>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+function updateTrip(idx, field, value) {
+  const trip = _adminConfig.trips[idx];
+  if (field === 'ow0') trip.outbound_window[0] = value;
+  else if (field === 'ow1') trip.outbound_window[1] = value;
+  else if (field === 'rw0') trip.return_window[0] = value;
+  else if (field === 'rw1') trip.return_window[1] = value;
+  else if (field === 'threshold') {
+    trip.price_threshold = value ? parseInt(value, 10) : null;
+  }
+}
+
+async function saveConfig() {
+  const btn = $('#admin-save');
+  const status = $('#admin-status');
+  btn.disabled = true;
+  status.textContent = 'Sauvegarde...';
+  try {
+    const r = await fetch('/api/admin/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_adminConfig),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.statusText);
+    }
+    status.textContent = 'Sauvegardé !';
+    status.style.color = 'var(--green)';
+    loadOverview();
+    setTimeout(() => {
+      status.textContent = '';
+      status.style.color = '';
+    }, 3000);
+  } catch (e) {
+    status.textContent = 'Erreur : ' + e.message;
+    status.style.color = 'var(--rose)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Enter key support for tag inputs
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'add-origin') addOrigin();
+  if (e.key === 'Enter' && e.target.id === 'add-dest') addDestination();
+});
 
 // ── Init ─────────────────────────────────────────────
 

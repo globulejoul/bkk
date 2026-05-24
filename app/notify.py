@@ -164,11 +164,40 @@ def _body_rise(a: dict) -> str:
     if pct is not None:
         pct_line = f"Percentile actuel: {pct:.0f}e\n"
 
+    # Trend info
+    trend_line = ""
+    trend = a.get("trend")
+    if trend:
+        direction = trend.get("direction", "stable")
+        change = trend.get("change_pct", 0)
+        if direction == "falling":
+            trend_line = f"Tendance 7j: ↘ en baisse ({change:+.1f}%)\n"
+        elif direction == "rising":
+            trend_line = f"Tendance 7j: ↗ en hausse ({change:+.1f}%)\n"
+        else:
+            trend_line = "Tendance 7j: → stable\n"
+
+    # Buy score
+    score_line = ""
+    buy_score = a.get("buy_score")
+    if buy_score is not None:
+        if buy_score >= 70:
+            label = "Bon moment pour acheter"
+        elif buy_score >= 50:
+            label = "Moment correct"
+        elif buy_score >= 30:
+            label = "Attendre si possible"
+        else:
+            label = "Pas le bon moment"
+        score_line = f"Score achat: {buy_score}/100 — {label}\n"
+
     return (
         f"**📈 Prix remonte** — {a['price']:.0f}€\n"
         f"Plus bas 7j: {a['recent_low']:.0f}€\n"
         f"Hausse: +{a['rise_pct']:.1f}% (+{a['delta_eur']:.0f}€)\n"
         f"{pct_line}"
+        f"{trend_line}"
+        f"{score_line}"
         f"{a['airlines']} • {a['origin']} → {a['destination']}\n\n"
         f"Si tu visais cette période, le bas pourrait être derrière toi."
     )

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -24,6 +24,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from app import config, db, watcher
 
@@ -31,15 +32,18 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 scheduler: BackgroundScheduler | None = None
 _run_lock = threading.Lock()
+_run_started_at: datetime | None = None
 
 
 RUN_TIMEOUT = 600  # 10 minutes max par run
 
 
 def _run_safe() -> None:
+    global _run_started_at
     if not _run_lock.acquire(blocking=False):
         print("Skip: previous run still in progress")
         return
+    _run_started_at = datetime.now()
     try:
         cfg = config.load()
         result = watcher.run_once(cfg)
@@ -47,6 +51,7 @@ def _run_safe() -> None:
     except Exception as e:
         print(f"Run error: {e}")
     finally:
+        _run_started_at = None
         _run_lock.release()
 
 
@@ -60,6 +65,29 @@ def _cleanup_stale_runs() -> None:
         ).rowcount
         if stale:
             print(f"Cleaned up {stale} stale run(s)")
+
+
+def _watchdog() -> None:
+    """Détecte les runs bloqués et force le nettoyage."""
+    global _run_started_at
+    if not _run_lock.locked() or _run_started_at is None:
+        return
+    elapsed = (datetime.now() - _run_started_at).total_seconds()
+    if elapsed < RUN_TIMEOUT:
+        return
+    print(f"WATCHDOG: run bloqué depuis {elapsed:.0f}s (>{RUN_TIMEOUT}s), nettoyage forcé")
+    with db.conn() as c:
+        now_iso = datetime.now().isoformat()
+        c.execute(
+            "UPDATE run_log SET status='timeout', finished_at=?, "
+            "error=? WHERE status='running'",
+            (now_iso, f"Watchdog timeout after {elapsed:.0f}s"),
+        )
+    _run_started_at = None
+    try:
+        _run_lock.release()
+    except RuntimeError:
+        pass
 
 
 def _flash_check() -> None:
@@ -125,8 +153,10 @@ async def lifespan(app: FastAPI):
     # Flash mode: vérification toutes les 5 minutes
     scheduler.add_job(_flash_check, IntervalTrigger(minutes=5),
                       id="flash_check", max_instances=1, coalesce=True)
+    scheduler.add_job(_watchdog, IntervalTrigger(minutes=2),
+                      id="watchdog", max_instances=1, coalesce=True)
     scheduler.start()
-    print(f"Scheduler started: {cfg.schedule_cron} + flash every 5min")
+    print(f"Scheduler started: {cfg.schedule_cron} + flash every 5min + watchdog every 2min")
     yield
     if scheduler:
         scheduler.shutdown(wait=False)
@@ -253,6 +283,56 @@ async def config_summary():
         "max_fly_duration_hours": cfg.max_fly_duration_hours,
         "schedule_cron": cfg.schedule_cron,
     }
+
+
+# ── Admin API ────────────────────────────────────────────────
+
+
+@app.get("/api/admin/config")
+async def get_admin_config():
+    """Return full editable config."""
+    data = config.load_raw()
+    return data
+
+
+class ConfigUpdate(BaseModel):
+    origins: list[str]
+    destinations: list[str]
+    adults: int | None = None
+    max_fly_duration_hours: int | None = None
+    schedule_cron: str | None = None
+    trips: list[dict] | None = None
+
+
+@app.put("/api/admin/config")
+async def update_admin_config(body: ConfigUpdate):
+    """Update config.yml with new values."""
+    data = config.load_raw()
+    data["origins"] = [o.strip().upper() for o in body.origins if o.strip()]
+    data["destinations"] = [d.strip().upper() for d in body.destinations if d.strip()]
+    if body.adults is not None:
+        data["adults"] = body.adults
+    if body.max_fly_duration_hours is not None:
+        data["max_fly_duration_hours"] = body.max_fly_duration_hours
+    if body.schedule_cron is not None:
+        data["schedule_cron"] = body.schedule_cron
+    if body.trips is not None:
+        data["trips"] = body.trips
+    try:
+        config.save_raw(data)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    # Reschedule if cron changed
+    if body.schedule_cron and scheduler:
+        try:
+            scheduler.remove_job("watcher")
+            trigger = CronTrigger.from_crontab(body.schedule_cron)
+            scheduler.add_job(_run_safe, trigger, id="watcher",
+                              max_instances=1, coalesce=True)
+            print(f"Scheduler rescheduled: {body.schedule_cron}")
+        except Exception as e:
+            print(f"Reschedule error: {e}")
+    return {"status": "ok"}
 
 
 @app.get("/api/fx-history")

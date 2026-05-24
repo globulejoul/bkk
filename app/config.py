@@ -77,3 +77,29 @@ def load() -> Config:
         ),
         trips=trips,
     )
+
+
+def load_raw() -> dict:
+    """Load raw YAML data for editing."""
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(f"Missing config: {CONFIG_PATH}")
+    return yaml.safe_load(CONFIG_PATH.read_text())
+
+
+def save_raw(data: dict) -> None:
+    """Write config back to YAML, preserving structure."""
+    # Validate before writing
+    if not data.get("origins") or not isinstance(data["origins"], list):
+        raise ValueError("origins must be a non-empty list")
+    if not data.get("destinations") or not isinstance(data["destinations"], list):
+        raise ValueError("destinations must be a non-empty list")
+    for t in data.get("trips", []):
+        if not t.get("name"):
+            raise ValueError("Each trip must have a name")
+        if not t.get("outbound_window") or len(t["outbound_window"]) != 2:
+            raise ValueError(f"Trip {t['name']}: outbound_window must be [start, end]")
+        if not t.get("return_window") or len(t["return_window"]) != 2:
+            raise ValueError(f"Trip {t['name']}: return_window must be [start, end]")
+
+    CONFIG_PATH.write_text(yaml.dump(data, default_flow_style=False,
+                                      allow_unicode=True, sort_keys=False))

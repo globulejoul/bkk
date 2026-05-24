@@ -49,23 +49,11 @@ header {
   border-bottom: 1px solid var(--border);
 }
 
-.logo { display: flex; align-items: baseline; gap: 0.75rem; }
-.logo .plane {
-  font-size: 1.5rem;
-  color: var(--gold);
-  transform: rotate(-15deg);
-  display: inline-block;
-}
-.logo h1 {
-  font-family: var(--serif);
-  font-weight: 400;
-  font-size: 2.25rem;
-  margin: 0;
-  letter-spacing: -0.02em;
-}
-.logo h1 em {
-  font-style: italic;
-  color: var(--gold);
+.logo { display: flex; align-items: center; }
+.logo-img {
+  height: 64px;
+  width: auto;
+  object-fit: contain;
 }
 
 .status {
@@ -448,7 +436,7 @@ tbody tr:hover { background: var(--bg-elev); }
     flex-shrink: 0;
   }
 
-  .logo h1 { font-size: 1.5rem; }
+  .logo-img { height: 48px; }
 
   #trips-grid {
     grid-template-columns: 1fr;
@@ -494,7 +482,7 @@ tbody tr:hover { background: var(--bg-elev); }
 }
 
 @media (max-width: 380px) {
-  .logo h1 { font-size: 1.25rem; }
+  .logo-img { height: 40px; }
   .trip-card .price-main { font-size: 1.75rem; }
   .tabs button { padding: 0.5rem 0.6rem; font-size: 0.75rem; }
   .trip-card .price-stats { font-size: 0.65rem; }
@@ -752,6 +740,160 @@ tbody tr:hover { background: var(--bg-elev); }
   color: #fff;
   font-weight: 600;
 }
+
+/* ── Admin page ───────────────────────────────────────── */
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+
+.admin-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+.admin-card h3 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 1.15rem;
+  margin: 0 0 1rem;
+}
+.admin-wide { grid-column: 1 / -1; }
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.tag .tag-remove {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1;
+  border: none;
+  background: none;
+  padding: 0 0.1rem;
+  font-family: var(--sans);
+}
+.tag .tag-remove:hover { color: var(--rose); }
+
+.tag-add {
+  display: flex;
+  gap: 0.5rem;
+}
+.tag-add input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.4rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  border-radius: 4px;
+  width: 80px;
+  text-transform: uppercase;
+}
+.tag-add input::placeholder { text-transform: none; }
+
+.trip-edit-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 0.75rem;
+}
+.trip-edit-card .trip-edit-name {
+  font-family: var(--serif);
+  font-size: 1.1rem;
+  margin-bottom: 0.75rem;
+}
+.trip-edit-row {
+  display: grid;
+  grid-template-columns: auto 1fr 1fr;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+.trip-edit-row label {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.trip-edit-row input[type="date"] {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  border-radius: 4px;
+  width: 100%;
+}
+.trip-edit-row input[type="number"] {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  border-radius: 4px;
+  width: 70px;
+}
+
+.btn-save {
+  background: var(--green) !important;
+  color: #fff !important;
+  border-color: var(--green) !important;
+  padding: 0.6rem 2rem !important;
+  font-weight: 600 !important;
+  font-size: 0.9rem !important;
+}
+.btn-save:hover:not(:disabled) {
+  background: var(--teal) !important;
+  border-color: var(--teal) !important;
+}
+
+.admin-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
+@media (max-width: 768px) {
+  .admin-grid { grid-template-columns: 1fr; }
+  .trip-edit-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .trip-edit-row label {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── end admin ────────────────────────────────────────── */
 
 @media (max-width: 768px) {
   .trip-heatmap,
