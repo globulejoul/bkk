@@ -996,7 +996,8 @@ tbody tr:hover { background: var(--bg-elev); }
   align-items: flex-start;
   flex-wrap: wrap;
 }
-.travelers-field label {
+.travelers-field label,
+.travelers-field-title {
   display: block;
   color: var(--text-dim);
   font-family: var(--mono);

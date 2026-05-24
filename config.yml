@@ -35,8 +35,9 @@ ntfy:
 hotels:
   - name: "Chatrium Riverside Bangkok"
     entity_id: "CgsI4tWK2cf7nNfzARAB"
-    nights: 3
-    price_threshold: 4500  # EUR total pour 3 nuits
+    checkin: "2026-10-16"
+    checkout: "2026-10-19"
+    price_threshold: 500  # EUR total pour le séjour
     enabled: true
 
 # ─── Périodes à surveiller (±3j autour de chaque borne) ────────

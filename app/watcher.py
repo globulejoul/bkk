@@ -130,14 +130,14 @@ def run_once(cfg: Config) -> dict[str, Any]:
             if not hotel.enabled:
                 print(f"  ⏸ Hotel {hotel.name}: désactivé, skip")
                 continue
-            for trip in cfg.trips:
-                if not trip.enabled:
-                    continue
-                try:
-                    _check_hotel(cfg, hotel, trip, rates)
-                except Exception as e:
-                    summary["errors"].append(f"Hotel {hotel.name}/{trip.name}: {e}")
-                    print(f"  ❌ Hotel {hotel.name}/{trip.name}: {e}")
+            if not hotel.checkin or not hotel.checkout:
+                print(f"  ⚠ Hotel {hotel.name}: dates manquantes, skip")
+                continue
+            try:
+                _check_hotel(cfg, hotel, rates)
+            except Exception as e:
+                summary["errors"].append(f"Hotel {hotel.name}: {e}")
+                print(f"  ❌ Hotel {hotel.name}: {e}")
 
         with db.conn() as c:
             db.finish_run(c, run_id, "ok", summary["trips_checked"],
@@ -578,21 +578,21 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
     return best_oj
 
 
-def _check_hotel(cfg: Config, hotel, trip, rates: dict[str, float]) -> None:
-    """Check hotel prices for one trip period."""
+def _check_hotel(cfg: Config, hotel, rates: dict[str, float]) -> None:
+    """Check hotel prices for specific dates."""
     today = date.today().isoformat()
     now = datetime.now().isoformat()
 
-    # Checkin = début fenêtre aller, checkout = checkin + nights
-    checkin = trip.outbound_window[0]
+    checkin = hotel.checkin
+    checkout = hotel.checkout
     checkin_dt = datetime.strptime(checkin, "%Y-%m-%d")
-    checkout_dt = checkin_dt + timedelta(days=hotel.nights)
-    checkout = checkout_dt.strftime("%Y-%m-%d")
+    checkout_dt = datetime.strptime(checkout, "%Y-%m-%d")
+    nights = (checkout_dt - checkin_dt).days
 
-    print(f"\n→ Hotel {hotel.name} pour {trip.name}: {checkin} → {checkout}")
+    print(f"\n→ Hotel {hotel.name}: {checkin} → {checkout} ({nights} nuits)")
 
     result = hotels.search_hotel(
-        entity_id=hotel.entity_id,
+        hotel_name=hotel.name,
         checkin=checkin,
         checkout=checkout,
         adults=cfg.adults,
@@ -611,7 +611,7 @@ def _check_hotel(cfg: Config, hotel, trip, rates: dict[str, float]) -> None:
                 hp.price, hp.currency, rates)
             db.insert_hotel_check(c, {
                 "check_date": today,
-                "trip_name": trip.name,
+                "trip_name": hotel.name,
                 "hotel_name": hotel.name,
                 "source": hp.source,
                 "price_local": hp.price,
@@ -619,7 +619,7 @@ def _check_hotel(cfg: Config, hotel, trip, rates: dict[str, float]) -> None:
                 "price_eur": price_eur,
                 "checkin_date": checkin,
                 "checkout_date": checkout,
-                "nights": hotel.nights,
+                "nights": nights,
                 "booking_url": hp.url,
                 "captured_at": now,
             })
@@ -634,7 +634,7 @@ def _check_hotel(cfg: Config, hotel, trip, rates: dict[str, float]) -> None:
         if best_eur is None:
             return
 
-        state = db.get_hotel_state(c, hotel.name, trip.name) or {}
+        state = db.get_hotel_state(c, hotel.name, hotel.name) or {}
         prev_low = state.get("lowest_price_eur")
 
         rolling = state.get("rolling") or []
@@ -655,21 +655,20 @@ def _check_hotel(cfg: Config, hotel, trip, rates: dict[str, float]) -> None:
                 "lowest_seen_date": today,
                 "lowest_source": result.best_source,
             })
-        db.upsert_hotel_state(c, hotel.name, trip.name, **update)
+        db.upsert_hotel_state(c, hotel.name, hotel.name, **update)
 
     # Alertes
     if new_low or hit_threshold:
         payload = {
             "kind": "hotel_low",
             "hotel": hotel.name,
-            "trip": trip.name,
             "price": best_eur,
             "previous_low": prev_low,
             "hit_threshold": hit_threshold,
             "source": result.best_source,
             "checkin": checkin,
             "checkout": checkout,
-            "nights": hotel.nights,
+            "nights": nights,
             "providers": [
                 {"source": p.source, "price": p.price, "currency": p.currency}
                 for p in result.prices
@@ -677,7 +676,7 @@ def _check_hotel(cfg: Config, hotel, trip, rates: dict[str, float]) -> None:
         }
         notify.send_hotel_ntfy(cfg, payload)
         with db.conn() as c:
-            db.log_alert(c, trip.name, "hotel_low", best_eur, payload)
+            db.log_alert(c, hotel.name, "hotel_low", best_eur, payload)
         tag = "🎯 SEUIL" if hit_threshold else "📉 BAS"
         print(f"  🏨 {tag} Hotel alert: {best_eur:.0f}€ ({result.best_source})")
 

@@ -216,7 +216,7 @@ def send_hotel_ntfy(cfg: Config, alert: dict) -> None:
     body_lines = [
         f"**{tag}** — {alert['price']:.0f}€ ({alert['nights']} nuits)",
         f"{alert['hotel']}",
-        f"{alert['checkin']} → {alert['checkout']} • {alert['trip']}",
+        f"{alert['checkin']} → {alert['checkout']}",
         f"Source: {alert['source']}",
     ]
     prev = alert.get("previous_low")

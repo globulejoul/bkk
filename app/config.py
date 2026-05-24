@@ -25,7 +25,8 @@ class Trip:
 class HotelWatch:
     name: str
     entity_id: str
-    nights: int = 3
+    checkin: str = ""       # YYYY-MM-DD
+    checkout: str = ""      # YYYY-MM-DD
     price_threshold: float | None = None
     enabled: bool = True
 
@@ -94,7 +95,8 @@ def load() -> Config:
             HotelWatch(
                 name=h["name"],
                 entity_id=h["entity_id"],
-                nights=h.get("nights", 3),
+                checkin=h.get("checkin", ""),
+                checkout=h.get("checkout", ""),
                 price_threshold=h.get("price_threshold"),
                 enabled=h.get("enabled", True),
             )

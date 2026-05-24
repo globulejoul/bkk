@@ -1,10 +1,14 @@
-"""Google Hotels scraper for specific hotel price monitoring."""
+"""Google Hotels scraper for specific hotel price monitoring.
+
+Approche validée : recherche par nom → clic sur l'hôtel → extraction
+des liens providers (booking.com, expedia, etc.) avec leurs prix.
+"""
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 
 @dataclass
@@ -27,47 +31,234 @@ class HotelResult:
     best_price: float | None = None
     best_currency: str = "EUR"
     best_source: str = ""
-    rating: float | None = None
     scraped_at: str = ""
 
 
-# Regex pour extraire les prix (supporte EUR, THB, USD, etc.)
-_PRICE_RE = re.compile(
-    r'(?:€|EUR)\s*([\d\s,.]+)|'           # €123 ou EUR 123
-    r'([\d\s,.]+)\s*(?:€|EUR)|'           # 123€ ou 123 EUR
-    r'(?:฿|THB)\s*([\d\s,.]+)|'           # ฿3,500 ou THB 3500
-    r'([\d\s,.]+)\s*(?:฿|THB)|'           # 3500฿
-    r'(?:\$|USD)\s*([\d\s,.]+)|'          # $123
-    r'([\d\s,.]+)\s*(?:\$|USD)'           # 123$
-)
+_PROVIDERS = {
+    "booking.com": "Booking.com",
+    "agoda": "Agoda",
+    "hotels.com": "Hotels.com",
+    "expedia": "Expedia",
+    "trip.com": "Trip.com",
+    "traveloka": "Traveloka",
+    "priceline": "Priceline",
+    "orbitz": "Orbitz",
+    "edreams": "eDreams",
+}
 
-# Providers connus sur Google Hotels
-_KNOWN_PROVIDERS = [
-    "Booking.com", "Agoda", "Hotels.com", "Expedia",
-    "Trip.com", "Traveloka", "Prestigia", "ZenHotels",
-    "Priceline", "Orbitz", "eDreams", "Kayak",
-    "Official Site", "Site officiel",
-]
+
+def search_hotel(
+    hotel_name: str,
+    checkin: str,
+    checkout: str,
+    adults: int = 1,
+    children: list[int] | None = None,
+    currency: str = "EUR",
+    entity_id: str = "",
+) -> HotelResult | None:
+    """Scrape Google Hotels pour un hôtel spécifique.
+
+    Recherche par nom, clique sur le résultat, et extrait les prix
+    par provider (Booking.com, Expedia, Trip.com, etc.).
+    """
+    checkin_dt = datetime.strptime(checkin, "%Y-%m-%d")
+    checkout_dt = datetime.strptime(checkout, "%Y-%m-%d")
+    nights = (checkout_dt - checkin_dt).days
+    total_guests = adults + (len(children) if children else 0)
+
+    print(f"  Hotels: {hotel_name} {checkin}→{checkout} "
+          f"({nights}n, {total_guests} guests)")
+
+    try:
+        return _scrape_with_timeout(
+            hotel_name, checkin, checkout, nights, total_guests,
+            currency, timeout=60)
+    except Exception as e:
+        print(f"  Hotels error: {e}")
+        return None
+
+
+def _scrape_with_timeout(
+    hotel_name: str, checkin: str, checkout: str,
+    nights: int, guests: int, currency: str,
+    timeout: int = 60,
+) -> HotelResult | None:
+    """Lance le scrape Playwright avec un timeout strict."""
+    result_holder: list[HotelResult | None] = [None]
+    error_holder: list[Exception | None] = [None]
+
+    def _do_scrape():
+        try:
+            result_holder[0] = _scrape_hotel(
+                hotel_name, checkin, checkout, nights, guests, currency)
+        except Exception as e:
+            error_holder[0] = e
+
+    t = threading.Thread(target=_do_scrape, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if t.is_alive():
+        print(f"  Hotels: timeout après {timeout}s, abandon")
+        return None
+    if error_holder[0]:
+        raise error_holder[0]
+    return result_holder[0]
+
+
+def _scrape_hotel(
+    hotel_name: str, checkin: str, checkout: str,
+    nights: int, guests: int, currency: str,
+) -> HotelResult:
+    """Scrape effectif via Playwright."""
+    from playwright.sync_api import sync_playwright
+
+    result = HotelResult(
+        hotel_name=hotel_name,
+        checkin=checkin,
+        checkout=checkout,
+        nights=nights,
+        scraped_at=datetime.now().isoformat(),
+    )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox",
+                  "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        ctx = browser.new_context(
+            locale="fr-FR",
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        page = ctx.new_page()
+
+        # 1) Recherche Google Hotels
+        search_q = hotel_name.replace(" ", "+")
+        url = (
+            f"https://www.google.com/travel/search"
+            f"?q={search_q}"
+            f"&checkin={checkin}&checkout={checkout}"
+            f"&guests={guests}&hl=fr"
+        )
+        page.goto(url, timeout=25000, wait_until="domcontentloaded")
+
+        # Consentement cookies
+        _handle_consent(page)
+        page.wait_for_timeout(3000)
+
+        # 2) Cliquer sur l'hôtel dans les résultats
+        name_lower = hotel_name.lower()
+        clicked = False
+        for link in page.query_selector_all("a"):
+            text = (link.text_content() or "").lower()
+            # Matcher sur les mots-clés du nom
+            words = name_lower.split()
+            if sum(1 for w in words if w in text) >= len(words) // 2 + 1:
+                link.click()
+                clicked = True
+                break
+
+        if not clicked:
+            print(f"  Hotels: '{hotel_name}' non trouvé dans les résultats")
+            browser.close()
+            return result
+
+        page.wait_for_timeout(5000)
+
+        # 3) Extraire les prix par provider depuis les liens
+        for a in page.query_selector_all("a[href]"):
+            try:
+                href = a.get_attribute("href") or ""
+                provider = _identify_provider(href)
+                if not provider:
+                    continue
+
+                # Remonter au parent pour trouver le prix à côté du lien
+                parent = a.evaluate_handle("el => el.closest('div, li, tr')")
+                parent_text = parent.evaluate(
+                    "el => el ? el.textContent : ''") if parent else ""
+                parsed = _parse_price(parent_text)
+                if parsed:
+                    price_val, cur = parsed
+                    if 1 < price_val < 50000:
+                        result.prices.append(HotelPrice(
+                            source=provider,
+                            price=price_val,
+                            currency=cur,
+                            url=href,
+                        ))
+            except Exception:
+                continue
+
+        browser.close()
+
+    # Dédupliquer par provider (garder le moins cher)
+    seen: dict[str, HotelPrice] = {}
+    for hp in result.prices:
+        if hp.source not in seen or hp.price < seen[hp.source].price:
+            seen[hp.source] = hp
+    result.prices = list(seen.values())
+
+    # Best price
+    if result.prices:
+        best = min(result.prices, key=lambda hp: hp.price)
+        result.best_price = best.price
+        result.best_currency = best.currency
+        result.best_source = best.source
+
+    print(f"  Hotels: {len(result.prices)} providers, "
+          f"best={result.best_price} {result.best_currency} ({result.best_source})")
+
+    return result
+
+
+def _handle_consent(page) -> None:
+    """Accepte la popup de consentement Google si présente."""
+    try:
+        for selector in [
+            'button:has-text("Tout accepter")',
+            'button:has-text("Accept all")',
+            'button:has-text("Accepter tout")',
+        ]:
+            btn = page.query_selector(selector)
+            if btn:
+                btn.click()
+                page.wait_for_timeout(2000)
+                return
+    except Exception:
+        pass
+
+
+def _identify_provider(href: str) -> str | None:
+    """Identifie le provider depuis l'URL du lien."""
+    href_lower = href.lower()
+    for domain, name in _PROVIDERS.items():
+        if domain in href_lower:
+            return name
+    return None
 
 
 def _parse_price(text: str) -> tuple[float, str] | None:
     """Extrait un montant et une devise d'un texte."""
-    text = text.strip()
-    # EUR
-    for pattern in [r'€\s*([\d\s.,]+)', r'([\d\s.,]+)\s*€',
-                    r'EUR\s*([\d\s.,]+)', r'([\d\s.,]+)\s*EUR']:
+    if not text:
+        return None
+    # EUR patterns
+    for pattern in [r'(\d[\d\s.,]*)\s*€', r'€\s*(\d[\d\s.,]*)']:
         m = re.search(pattern, text)
         if m:
             return _clean_amount(m.group(1)), "EUR"
     # THB
-    for pattern in [r'฿\s*([\d\s.,]+)', r'([\d\s.,]+)\s*฿',
-                    r'THB\s*([\d\s.,]+)', r'([\d\s.,]+)\s*THB']:
+    for pattern in [r'(\d[\d\s.,]*)\s*฿', r'฿\s*(\d[\d\s.,]*)']:
         m = re.search(pattern, text)
         if m:
             return _clean_amount(m.group(1)), "THB"
     # USD
-    for pattern in [r'\$\s*([\d\s.,]+)', r'([\d\s.,]+)\s*\$',
-                    r'USD\s*([\d\s.,]+)', r'([\d\s.,]+)\s*USD']:
+    for pattern in [r'\$\s*(\d[\d\s.,]*)', r'(\d[\d\s.,]*)\s*\$']:
         m = re.search(pattern, text)
         if m:
             return _clean_amount(m.group(1)), "USD"
@@ -75,9 +266,8 @@ def _parse_price(text: str) -> tuple[float, str] | None:
 
 
 def _clean_amount(s: str) -> float:
-    """Nettoie un montant : '3 500,00' ou '3,500.00' → 3500.0."""
+    """'3 500,00' ou '3,500.00' → 3500.0"""
     s = s.strip().replace('\u202f', '').replace('\xa0', '').replace(' ', '')
-    # Déterminer le séparateur décimal
     if ',' in s and '.' in s:
         if s.rfind(',') > s.rfind('.'):
             s = s.replace('.', '').replace(',', '.')
@@ -90,256 +280,3 @@ def _clean_amount(s: str) -> float:
         else:
             s = s.replace(',', '')
     return float(s)
-
-
-def search_hotel(
-    entity_id: str,
-    checkin: str,
-    checkout: str,
-    adults: int = 1,
-    children: list[int] | None = None,
-    currency: str = "EUR",
-) -> HotelResult | None:
-    """Scrape Google Hotels pour un hôtel spécifique.
-
-    Args:
-        entity_id: Google Hotels entity ID (ex: CgsI4tWK2cf7nNfzARAB)
-        checkin: Date check-in YYYY-MM-DD
-        checkout: Date check-out YYYY-MM-DD
-        adults: Nombre d'adultes
-        children: Liste d'âges des enfants
-        currency: Devise souhaitée
-
-    Returns:
-        HotelResult avec les prix par provider, ou None si échec.
-    """
-    from datetime import datetime
-
-    checkin_dt = datetime.strptime(checkin, "%Y-%m-%d")
-    checkout_dt = datetime.strptime(checkout, "%Y-%m-%d")
-    nights = (checkout_dt - checkin_dt).days
-
-    url = (
-        f"https://www.google.com/travel/hotels/entity/{entity_id}/prices"
-        f"?checkin={checkin}&checkout={checkout}"
-        f"&guests={adults}"
-        f"&currency={currency}&hl=fr"
-    )
-
-    print(f"  Hotels: scraping {url}")
-
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox",
-                      "--disable-dev-shm-usage"],
-            )
-            context = browser.new_context(
-                locale="fr-FR",
-                viewport={"width": 1280, "height": 900},
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
-            page.goto(url, timeout=30000, wait_until="domcontentloaded")
-
-            # Gérer le consentement Google cookies
-            _handle_consent(page)
-
-            # Attendre que les prix se chargent
-            page.wait_for_timeout(5000)
-
-            # Extraire les données
-            result = _extract_prices(page, entity_id, checkin, checkout,
-                                     nights, currency)
-
-            browser.close()
-            return result
-
-    except Exception as e:
-        print(f"  Hotels error: {e}")
-        return None
-
-
-def _handle_consent(page) -> None:
-    """Accepte la popup de consentement Google si présente."""
-    try:
-        # Bouton "Tout accepter" ou "Accept all"
-        for selector in [
-            'button:has-text("Tout accepter")',
-            'button:has-text("Accept all")',
-            'button:has-text("Accepter tout")',
-            'form[action*="consent"] button',
-        ]:
-            btn = page.query_selector(selector)
-            if btn:
-                btn.click()
-                page.wait_for_timeout(2000)
-                return
-    except Exception:
-        pass
-
-
-def _extract_prices(page, entity_id: str, checkin: str, checkout: str,
-                    nights: int, currency: str) -> HotelResult:
-    """Extrait les prix depuis la page Google Hotels."""
-    result = HotelResult(
-        hotel_name="",
-        checkin=checkin,
-        checkout=checkout,
-        nights=nights,
-        scraped_at=datetime.now().isoformat(),
-    )
-
-    # Nom de l'hôtel - chercher dans les headings
-    for sel in ['h1', 'h2', '[data-hotel-name]', '[class*="hotel"] h1']:
-        el = page.query_selector(sel)
-        if el:
-            name = el.text_content().strip()
-            if name and len(name) > 3:
-                result.hotel_name = name
-                break
-
-    # Rating
-    for sel in ['[class*="rating"]', '[aria-label*="étoile"]',
-                '[aria-label*="star"]']:
-        el = page.query_selector(sel)
-        if el:
-            text = el.get_attribute("aria-label") or el.text_content() or ""
-            m = re.search(r'([\d.]+)', text)
-            if m:
-                val = float(m.group(1))
-                if 0 < val <= 5:
-                    result.rating = val
-                    break
-
-    # Extraire tous les blocs de prix
-    # Google Hotels affiche une liste de providers avec prix
-    # Stratégie : récupérer le texte visible et parser
-    content = page.content()
-
-    # Chercher les liens vers les providers (contiennent le prix et le nom)
-    links = page.query_selector_all('a[href*="booking.com"], a[href*="agoda"], '
-                                     'a[href*="hotels.com"], a[href*="expedia"], '
-                                     'a[href*="trip.com"], a[href*="traveloka"]')
-    for link in links:
-        try:
-            text = link.text_content() or ""
-            href = link.get_attribute("href") or ""
-            provider = _identify_provider(href, text)
-            parsed = _parse_price(text)
-            if provider and parsed:
-                price_val, cur = parsed
-                result.prices.append(HotelPrice(
-                    source=provider,
-                    price=price_val,
-                    currency=cur,
-                    url=href,
-                ))
-        except Exception:
-            continue
-
-    # Fallback : chercher dans tous les éléments contenant un prix
-    if not result.prices:
-        all_elements = page.query_selector_all(
-            '[class*="price"], [class*="rate"], [data-price]'
-        )
-        for el in all_elements:
-            try:
-                text = el.text_content() or ""
-                parsed = _parse_price(text)
-                if parsed:
-                    price_val, cur = parsed
-                    # Trouver le provider le plus proche
-                    parent_text = ""
-                    parent = el.query_selector("xpath=..")
-                    if parent:
-                        parent_text = parent.text_content() or ""
-                    provider = _identify_provider_from_text(parent_text)
-                    result.prices.append(HotelPrice(
-                        source=provider or "Google Hotels",
-                        price=price_val,
-                        currency=cur,
-                    ))
-            except Exception:
-                continue
-
-    # Fallback ultime : regex sur tout le texte de la page
-    if not result.prices:
-        page_text = page.inner_text("body")
-        result.prices = _extract_prices_from_text(page_text, currency)
-
-    # Dédupliquer par provider (garder le moins cher)
-    seen: dict[str, HotelPrice] = {}
-    for p in result.prices:
-        if p.source not in seen or p.price < seen[p.source].price:
-            seen[p.source] = p
-    result.prices = list(seen.values())
-
-    # Best price
-    if result.prices:
-        best = min(result.prices, key=lambda p: p.price)
-        result.best_price = best.price
-        result.best_currency = best.currency
-        result.best_source = best.source
-
-    print(f"  Hotels: {len(result.prices)} providers trouvés, "
-          f"best={result.best_price} {result.best_currency} ({result.best_source})")
-
-    return result
-
-
-def _identify_provider(href: str, text: str) -> str | None:
-    """Identifie le provider depuis l'URL ou le texte."""
-    href_lower = href.lower()
-    if "booking.com" in href_lower:
-        return "Booking.com"
-    if "agoda" in href_lower:
-        return "Agoda"
-    if "hotels.com" in href_lower:
-        return "Hotels.com"
-    if "expedia" in href_lower:
-        return "Expedia"
-    if "trip.com" in href_lower:
-        return "Trip.com"
-    if "traveloka" in href_lower:
-        return "Traveloka"
-    if "priceline" in href_lower:
-        return "Priceline"
-    return _identify_provider_from_text(text)
-
-
-def _identify_provider_from_text(text: str) -> str | None:
-    """Identifie le provider depuis un texte."""
-    text_lower = text.lower()
-    for provider in _KNOWN_PROVIDERS:
-        if provider.lower() in text_lower:
-            return provider
-    return None
-
-
-def _extract_prices_from_text(text: str, default_currency: str) -> list[HotelPrice]:
-    """Extraction fallback : parse le texte brut pour des prix."""
-    prices = []
-    lines = text.split('\n')
-    for i, line in enumerate(lines):
-        parsed = _parse_price(line)
-        if not parsed:
-            continue
-        price_val, cur = parsed
-        if price_val <= 0 or price_val > 100000:
-            continue
-        # Chercher le provider dans les lignes voisines
-        context = ' '.join(lines[max(0, i-2):i+3])
-        provider = _identify_provider_from_text(context) or "Google Hotels"
-        prices.append(HotelPrice(
-            source=provider,
-            price=price_val,
-            currency=cur,
-        ))
-    return prices

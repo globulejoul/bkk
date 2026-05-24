@@ -820,8 +820,8 @@ async function loadHotels() {
     sel.innerHTML = '';
     hotels.forEach(h => {
       const o = document.createElement('option');
-      o.value = `${h.hotel_name}|${h.trip_name}`;
-      o.textContent = `${h.hotel_name} — ${h.trip_name}`;
+      o.value = h.hotel_name;
+      o.textContent = h.hotel_name;
       sel.appendChild(o);
     });
     if (prev) sel.value = prev;
@@ -849,9 +849,11 @@ function buildHotelCard(h) {
     else priceClass = '';
   }
 
+  const nights = h.nights || (h.checkin && h.checkout
+    ? Math.round((new Date(h.checkout) - new Date(h.checkin)) / 86400000) : '?');
   card.innerHTML = `
     <div class="name">🏨 ${esc(h.hotel_name)}</div>
-    <div class="dates">${esc(h.trip_name)} · ${h.nights || '?'} nuits</div>
+    <div class="dates">${h.checkin ? dateFmt(h.checkin) + ' → ' + dateFmt(h.checkout) : 'Dates non définies'} · ${nights} nuits</div>
     <div class="price-main ${priceClass}">
       ${priceTxt}${h.current_best != null ? '<span class="currency">€</span>' : ''}
     </div>
@@ -867,13 +869,12 @@ function buildHotelCard(h) {
 $('#hotel-select').addEventListener('change', loadHotelDetail);
 
 async function loadHotelDetail() {
-  const val = $('#hotel-select').value;
-  if (!val) return;
-  const [hotelName, tripName] = val.split('|');
+  const hotelName = $('#hotel-select').value;
+  if (!hotelName) return;
 
   const [history, breakdown] = await Promise.all([
-    fetch(`/api/hotels/${encodeURIComponent(hotelName)}/${encodeURIComponent(tripName)}/history`).then(r => r.json()),
-    fetch(`/api/hotels/${encodeURIComponent(hotelName)}/${encodeURIComponent(tripName)}/breakdown`).then(r => r.json()),
+    fetch(`/api/hotels/${encodeURIComponent(hotelName)}/history`).then(r => r.json()),
+    fetch(`/api/hotels/${encodeURIComponent(hotelName)}/breakdown`).then(r => r.json()),
   ]);
 
   // Chart
@@ -1017,7 +1018,7 @@ function renderTravelers() {
   children.forEach((age, i) => {
     childrenHtml += `
       <div class="child-row">
-        <span class="child-label">Enfant ${i + 1}</span>
+        <label for="child-age-${i}" class="child-label">Enfant ${i + 1}</label>
         <div class="input-unit">
           <input type="number" id="child-age-${i}" name="child-age-${i}" min="0" max="17" value="${age}"
                  data-child-idx="${i}">
@@ -1027,6 +1028,7 @@ function renderTravelers() {
       </div>`;
   });
 
+  const maxFly = _adminConfig.max_fly_duration_hours || 18;
   container.innerHTML = `
     <div class="travelers-row">
       <div class="travelers-field">
@@ -1034,16 +1036,26 @@ function renderTravelers() {
         <input type="number" id="admin-adults" name="admin-adults" min="1" max="9" value="${adults}">
       </div>
       <div class="travelers-field">
-        <label>Enfants</label>
+        <span class="travelers-field-title">Enfants</span>
         <div class="children-list">
           ${childrenHtml || '<span class="dim" style="font-size:0.75rem">Aucun enfant</span>'}
         </div>
         <button id="btn-add-child" class="btn-small">+ Ajouter un enfant</button>
       </div>
+      <div class="travelers-field">
+        <label for="admin-max-fly">Durée vol max</label>
+        <div class="input-unit">
+          <input type="number" id="admin-max-fly" name="admin-max-fly" min="6" max="48" value="${maxFly}">
+          <span class="unit">h</span>
+        </div>
+      </div>
     </div>`;
 
   container.querySelector('#admin-adults').addEventListener('change', (e) => {
     _adminConfig.adults = parseInt(e.target.value, 10) || 1;
+  });
+  container.querySelector('#admin-max-fly').addEventListener('change', (e) => {
+    _adminConfig.max_fly_duration_hours = parseInt(e.target.value, 10) || 18;
   });
   container.querySelectorAll('input[data-child-idx]').forEach(input => {
     input.addEventListener('change', () => {
@@ -1080,7 +1092,7 @@ function renderHotelsAdmin() {
     card.innerHTML = `
       <div class="trip-edit-header">
         <label class="toggle" title="${h.enabled !== false ? 'Désactiver' : 'Activer'}">
-          <input type="checkbox" ${h.enabled !== false ? 'checked' : ''} data-hotel-toggle="${idx}">
+          <input type="checkbox" ${h.enabled !== false ? 'checked' : ''} data-hotel-toggle="${idx}" aria-label="Activer ${esc(h.name)}">
           <span class="toggle-slider"></span>
         </label>
         <span class="trip-edit-name">${esc(h.name)}</span>
@@ -1092,12 +1104,16 @@ function renderHotelsAdmin() {
                value="${esc(h.entity_id)}" data-hotel="${idx}" data-field="entity_id"
                style="font-size:0.7rem;width:220px">
       </div>
+      <div class="trip-edit-row trip-date-row">
+        <label for="hotel-${idx}-checkin">Check-in</label>
+        <input type="date" id="hotel-${idx}-checkin" name="hotel-${idx}-checkin"
+               value="${h.checkin || ''}" data-hotel="${idx}" data-field="checkin">
+        <span class="date-sep">check-out</span>
+        <input type="date" id="hotel-${idx}-checkout" name="hotel-${idx}-checkout"
+               value="${h.checkout || ''}" data-hotel="${idx}" data-field="checkout">
+      </div>
       <div class="trip-edit-row">
-        <label for="hotel-${idx}-nights">Nuits</label>
-        <input type="number" id="hotel-${idx}-nights" name="hotel-${idx}-nights"
-               value="${h.nights || 3}" min="1" max="30" data-hotel="${idx}" data-field="nights"
-               style="width:60px">
-        <label for="hotel-${idx}-threshold" style="margin-left:1rem">Seuil</label>
+        <label for="hotel-${idx}-threshold">Seuil alerte</label>
         <div class="input-unit">
           <input type="number" id="hotel-${idx}-threshold" name="hotel-${idx}-threshold"
                  value="${h.price_threshold || ''}" placeholder="4500" data-hotel="${idx}" data-field="price_threshold">
@@ -1111,7 +1127,8 @@ function renderHotelsAdmin() {
         const ht = _adminConfig.hotels[input.dataset.hotel];
         const f = input.dataset.field;
         if (f === 'entity_id') ht.entity_id = input.value;
-        else if (f === 'nights') ht.nights = parseInt(input.value, 10) || 3;
+        else if (f === 'checkin') ht.checkin = input.value;
+        else if (f === 'checkout') ht.checkout = input.value;
         else if (f === 'price_threshold') ht.price_threshold = input.value ? parseInt(input.value, 10) : null;
       });
     });
@@ -1134,7 +1151,7 @@ function addHotel() {
   const entity = entityInput.value.trim();
   if (!name || !entity) return;
   if (!_adminConfig.hotels) _adminConfig.hotels = [];
-  _adminConfig.hotels.push({ name, entity_id: entity, nights: 3, enabled: true });
+  _adminConfig.hotels.push({ name, entity_id: entity, checkin: '', checkout: '', enabled: true });
   renderHotelsAdmin();
   nameInput.value = '';
   entityInput.value = '';
@@ -1166,7 +1183,7 @@ function renderTrips() {
     card.innerHTML = `
       <div class="trip-edit-header">
         <label class="toggle" title="${enabled ? 'Désactiver' : 'Activer'} cette période">
-          <input type="checkbox" ${enabled ? 'checked' : ''} data-trip-toggle="${idx}">
+          <input type="checkbox" ${enabled ? 'checked' : ''} data-trip-toggle="${idx}" aria-label="Activer ${esc(trip.name)}">
           <span class="toggle-slider"></span>
         </label>
         <span class="trip-edit-name">${esc(trip.name)}</span>

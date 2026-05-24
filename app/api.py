@@ -35,7 +35,7 @@ _run_lock = threading.Lock()
 _run_started_at: datetime | None = None
 
 
-RUN_TIMEOUT = 600  # 10 minutes max par run
+RUN_TIMEOUT = 900  # 15 minutes max par run (flights + hotels)
 
 
 def _run_safe() -> None:
@@ -168,6 +168,11 @@ app = FastAPI(title="Flight Watcher", lifespan=lifespan)
 @app.get("/")
 async def root():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/robots.txt")
+async def robots():
+    return FileResponse(STATIC_DIR / "robots.txt")
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -350,34 +355,39 @@ async def get_hotels():
     for s in summary:
         h = by_name.get(s["hotel_name"])
         if h:
-            s["nights"] = h.nights
+            s["checkin"] = h.checkin
+            s["checkout"] = h.checkout
             s["threshold"] = h.price_threshold
             s["enabled"] = h.enabled
     # Add hotels from config that have no data yet
-    have = {(s["hotel_name"], s["trip_name"]) for s in summary}
+    have = {s["hotel_name"] for s in summary}
     for h in cfg.hotels:
-        for t in cfg.trips:
-            if (h.name, t.name) not in have:
-                summary.append({
-                    "hotel_name": h.name, "trip_name": t.name,
-                    "current_best": None, "lowest_price_eur": None,
-                    "avg_30d": None, "last_check_at": None,
-                    "nights": h.nights, "threshold": h.price_threshold,
-                    "enabled": h.enabled,
-                })
+        if h.name not in have:
+            checkin_dt = datetime.strptime(h.checkin, "%Y-%m-%d") if h.checkin else None
+            checkout_dt = datetime.strptime(h.checkout, "%Y-%m-%d") if h.checkout else None
+            nights = (checkout_dt - checkin_dt).days if checkin_dt and checkout_dt else None
+            summary.append({
+                "hotel_name": h.name, "trip_name": h.name,
+                "current_best": None, "lowest_price_eur": None,
+                "avg_30d": None, "last_check_at": None,
+                "checkin": h.checkin, "checkout": h.checkout,
+                "nights": nights,
+                "threshold": h.price_threshold,
+                "enabled": h.enabled,
+            })
     return summary
 
 
-@app.get("/api/hotels/{hotel_name}/{trip_name}/history")
-async def get_hotel_history(hotel_name: str, trip_name: str, days: int = 60):
+@app.get("/api/hotels/{hotel_name}/history")
+async def get_hotel_history(hotel_name: str, days: int = 60):
     with db.conn() as c:
-        return db.hotel_history(c, hotel_name, trip_name, days)
+        return db.hotel_history(c, hotel_name, hotel_name, days)
 
 
-@app.get("/api/hotels/{hotel_name}/{trip_name}/breakdown")
-async def get_hotel_breakdown(hotel_name: str, trip_name: str):
+@app.get("/api/hotels/{hotel_name}/breakdown")
+async def get_hotel_breakdown(hotel_name: str):
     with db.conn() as c:
-        return db.hotel_breakdown(c, hotel_name, trip_name)
+        return db.hotel_breakdown(c, hotel_name, hotel_name)
 
 
 @app.get("/api/fx-history")
