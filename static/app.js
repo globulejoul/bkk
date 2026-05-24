@@ -885,20 +885,24 @@ function renderTrips() {
     const rw = trip.return_window || ['', ''];
     card.innerHTML = `
       <div class="trip-edit-name">${esc(trip.name)}</div>
-      <div class="trip-edit-row">
-        <label for="trip-${idx}-ow0">Aller du</label>
+      <div class="trip-edit-row trip-date-row">
+        <label for="trip-${idx}-ow0">Aller entre le</label>
         <input type="date" id="trip-${idx}-ow0" name="trip-${idx}-ow0" data-trip="${idx}" data-field="ow0" value="${ow[0]}">
+        <span class="date-sep">et le</span>
         <input type="date" id="trip-${idx}-ow1" name="trip-${idx}-ow1" data-trip="${idx}" data-field="ow1" value="${ow[1]}">
       </div>
-      <div class="trip-edit-row">
-        <label for="trip-${idx}-rw0">Retour du</label>
+      <div class="trip-edit-row trip-date-row">
+        <label for="trip-${idx}-rw0">Retour entre le</label>
         <input type="date" id="trip-${idx}-rw0" name="trip-${idx}-rw0" data-trip="${idx}" data-field="rw0" value="${rw[0]}">
+        <span class="date-sep">et le</span>
         <input type="date" id="trip-${idx}-rw1" name="trip-${idx}-rw1" data-trip="${idx}" data-field="rw1" value="${rw[1]}">
       </div>
       <div class="trip-edit-row">
         <label for="trip-${idx}-threshold">Seuil alerte</label>
-        <input type="number" id="trip-${idx}-threshold" name="trip-${idx}-threshold" data-trip="${idx}" data-field="threshold" value="${trip.price_threshold || ''}" placeholder="ex: 800">
-        <span class="dim" style="font-size:0.75rem">\u20ac</span>
+        <div class="input-unit">
+          <input type="number" id="trip-${idx}-threshold" name="trip-${idx}-threshold" data-trip="${idx}" data-field="threshold" value="${trip.price_threshold || ''}" placeholder="800">
+          <span class="unit">\u20ac</span>
+        </div>
       </div>
     `;
     card.querySelectorAll('input').forEach(input => {

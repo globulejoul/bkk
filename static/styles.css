@@ -836,10 +836,10 @@ tbody tr:hover { background: var(--bg-elev); }
   margin-bottom: 0.75rem;
 }
 .trip-edit-row {
-  display: grid;
-  grid-template-columns: auto 1fr 1fr;
-  gap: 0.5rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  gap: 0.4rem 0.6rem;
   font-family: var(--mono);
   font-size: 0.8rem;
   margin-bottom: 0.5rem;
@@ -851,6 +851,10 @@ tbody tr:hover { background: var(--bg-elev); }
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
+.date-sep {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+}
 .trip-edit-row input[type="date"] {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -859,17 +863,28 @@ tbody tr:hover { background: var(--bg-elev); }
   font-family: var(--mono);
   font-size: 0.8rem;
   border-radius: 4px;
-  width: 100%;
 }
-.trip-edit-row input[type="number"] {
+.input-unit {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+}
+.input-unit input[type="number"] {
   background: var(--bg-card);
   border: 1px solid var(--border);
   color: var(--text);
-  padding: 0.35rem 0.5rem;
+  padding: 0.35rem 1.4rem 0.35rem 0.5rem;
   font-family: var(--mono);
   font-size: 0.8rem;
   border-radius: 4px;
-  width: 70px;
+  width: 90px;
+}
+.input-unit .unit {
+  position: absolute;
+  right: 0.5rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  pointer-events: none;
 }
 
 .btn-save {
@@ -897,12 +912,6 @@ tbody tr:hover { background: var(--bg-elev); }
 
 @media (max-width: 768px) {
   .admin-grid { grid-template-columns: 1fr; }
-  .trip-edit-row {
-    grid-template-columns: 1fr 1fr;
-  }
-  .trip-edit-row label {
-    grid-column: 1 / -1;
-  }
 }
 
 /* ── end admin ────────────────────────────────────────── */
