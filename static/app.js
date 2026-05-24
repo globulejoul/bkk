@@ -875,6 +875,15 @@ function removeDestination(i) {
   renderDestinations();
 }
 
+// Dates officielles vacances scolaires Zone A (Lyon) 2026-2027
+const VACANCES_ZONE_A = {
+  'Toussaint 2026':       ['2026-10-17', '2026-11-02'],
+  'Noël 2026':            ['2026-12-19', '2027-01-04'],
+  'Hiver 2027':           ['2027-02-13', '2027-03-01'],
+  'Printemps 2027':       ['2027-04-10', '2027-04-26'],
+  'Été 2027 (2-3 sem)':   ['2027-07-05', '2027-08-31'],
+};
+
 function renderTrips() {
   const container = $('#admin-trips');
   container.innerHTML = '';
@@ -883,8 +892,15 @@ function renderTrips() {
     card.className = 'trip-edit-card';
     const ow = trip.outbound_window || ['', ''];
     const rw = trip.return_window || ['', ''];
+    const vac = VACANCES_ZONE_A[trip.name];
+    const vacInfo = vac
+      ? `<span class="dim trip-edit-vac">Vacances : ${dateFmt(vac[0])} \u2192 ${dateFmt(vac[1])}</span>`
+      : '';
     card.innerHTML = `
-      <div class="trip-edit-name">${esc(trip.name)}</div>
+      <div class="trip-edit-header">
+        <span class="trip-edit-name">${esc(trip.name)}</span>
+        ${vacInfo}
+      </div>
       <div class="trip-edit-row trip-date-row">
         <label for="trip-${idx}-ow0">Aller entre le</label>
         <input type="date" id="trip-${idx}-ow0" name="trip-${idx}-ow0" data-trip="${idx}" data-field="ow0" value="${ow[0]}">
