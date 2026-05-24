@@ -18,6 +18,7 @@ class Trip:
     price_threshold: float | None = None
     min_nights: int | None = None
     max_nights: int | None = None
+    enabled: bool = True
 
 
 @dataclass
@@ -56,6 +57,7 @@ def load() -> Config:
             price_threshold=t.get("price_threshold"),
             min_nights=t.get("min_nights"),
             max_nights=t.get("max_nights"),
+            enabled=t.get("enabled", True),
         )
         for t in data.get("trips", [])
     ]

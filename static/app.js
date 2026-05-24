@@ -896,8 +896,14 @@ function renderTrips() {
     const vacInfo = vac
       ? `<span class="dim trip-edit-vac">Vacances : ${dateFmt(vac[0])} \u2192 ${dateFmt(vac[1])}</span>`
       : '';
+    const enabled = trip.enabled !== false;
+    card.classList.toggle('trip-disabled', !enabled);
     card.innerHTML = `
       <div class="trip-edit-header">
+        <label class="toggle" title="${enabled ? 'Désactiver' : 'Activer'} cette période">
+          <input type="checkbox" ${enabled ? 'checked' : ''} data-trip-toggle="${idx}">
+          <span class="toggle-slider"></span>
+        </label>
         <span class="trip-edit-name">${esc(trip.name)}</span>
         ${vacInfo}
       </div>
@@ -921,7 +927,7 @@ function renderTrips() {
         </div>
       </div>
     `;
-    card.querySelectorAll('input').forEach(input => {
+    card.querySelectorAll('input[data-field]').forEach(input => {
       input.addEventListener('change', () => {
         const t = _adminConfig.trips[input.dataset.trip];
         const f = input.dataset.field;
@@ -931,6 +937,10 @@ function renderTrips() {
         else if (f === 'rw1') t.return_window[1] = input.value;
         else if (f === 'threshold') t.price_threshold = input.value ? parseInt(input.value, 10) : null;
       });
+    });
+    card.querySelector('input[data-trip-toggle]').addEventListener('change', (e) => {
+      _adminConfig.trips[idx].enabled = e.target.checked;
+      card.classList.toggle('trip-disabled', !e.target.checked);
     });
     container.appendChild(card);
   });

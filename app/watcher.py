@@ -114,6 +114,9 @@ def run_once(cfg: Config) -> dict[str, Any]:
         rates = fx.fetch_rates(cfg.currency, ["THB"])
 
         for trip in cfg.trips:
+            if not trip.enabled:
+                print(f"  ⏸ {trip.name}: désactivé, skip")
+                continue
             try:
                 trip_alerts = _check_trip(cfg, trip, rates)
                 summary["alerts_generated"] += trip_alerts
