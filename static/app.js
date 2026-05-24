@@ -806,6 +806,7 @@ async function loadAdmin() {
     _adminConfig = await fetch('/api/admin/config').then(r => r.json());
     renderOrigins();
     renderDestinations();
+    renderTravelers();
     renderTrips();
     $('#admin-status').textContent = '';
   } catch (e) {
@@ -873,6 +874,62 @@ function addDestination() {
 function removeDestination(i) {
   _adminConfig.destinations.splice(i, 1);
   renderDestinations();
+}
+
+function renderTravelers() {
+  const container = $('#admin-travelers');
+  if (!_adminConfig) return;
+  const adults = _adminConfig.adults || 1;
+  const children = _adminConfig.children || [];
+
+  let childrenHtml = '';
+  children.forEach((age, i) => {
+    childrenHtml += `
+      <div class="child-row">
+        <span class="child-label">Enfant ${i + 1}</span>
+        <div class="input-unit">
+          <input type="number" id="child-age-${i}" name="child-age-${i}" min="0" max="17" value="${age}"
+                 data-child-idx="${i}">
+          <span class="unit">ans</span>
+        </div>
+        <button class="tag-remove" data-remove-child="${i}" title="Retirer">\u00d7</button>
+      </div>`;
+  });
+
+  container.innerHTML = `
+    <div class="travelers-row">
+      <div class="travelers-field">
+        <label for="admin-adults">Adultes</label>
+        <input type="number" id="admin-adults" name="admin-adults" min="1" max="9" value="${adults}">
+      </div>
+      <div class="travelers-field">
+        <label>Enfants</label>
+        <div class="children-list">
+          ${childrenHtml || '<span class="dim" style="font-size:0.75rem">Aucun enfant</span>'}
+        </div>
+        <button id="btn-add-child" class="btn-small">+ Ajouter un enfant</button>
+      </div>
+    </div>`;
+
+  container.querySelector('#admin-adults').addEventListener('change', (e) => {
+    _adminConfig.adults = parseInt(e.target.value, 10) || 1;
+  });
+  container.querySelectorAll('input[data-child-idx]').forEach(input => {
+    input.addEventListener('change', () => {
+      _adminConfig.children[parseInt(input.dataset.childIdx, 10)] = parseInt(input.value, 10) || 0;
+    });
+  });
+  container.querySelectorAll('button[data-remove-child]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _adminConfig.children.splice(parseInt(btn.dataset.removeChild, 10), 1);
+      renderTravelers();
+    });
+  });
+  container.querySelector('#btn-add-child').addEventListener('click', () => {
+    if (!_adminConfig.children) _adminConfig.children = [];
+    _adminConfig.children.push(10);
+    renderTravelers();
+  });
 }
 
 // Dates officielles vacances scolaires Zone A (Lyon) 2026-2027
@@ -1000,7 +1057,10 @@ async function loadIntro() {
       fetch('/api/trips').then(r => r.json()),
     ]);
     const cron = parseCron(cfg.schedule_cron);
-    const pax = cfg.adults === 1 ? '1 personne' : cfg.adults + ' personnes';
+    const kids = cfg.children && cfg.children.length
+      ? ` + ${cfg.children.length} enfant${cfg.children.length > 1 ? 's' : ''} (${cfg.children.join(' et ')} ans)`
+      : '';
+    const pax = (cfg.adults === 1 ? '1 adulte' : cfg.adults + ' adultes') + kids;
     const nbPeriodes = trips.length;
     $('#intro').textContent =
       `Check auto ${cron} pour ${pax} · ` +

@@ -14,6 +14,7 @@ destinations: [BKK, HKT, CNX]
 currency: EUR
 
 adults: 1
+children: [9, 11]  # âges des enfants (anniversaires en septembre)
 max_fly_duration_hours: 18
 
 # Cron pour le scheduler interne (timezone Europe/Paris)

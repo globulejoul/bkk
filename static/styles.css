@@ -62,6 +62,8 @@ header {
   gap: 1rem;
   font-family: var(--mono);
   font-size: 0.8rem;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .dim { color: var(--text-dim); }
 .faint { color: var(--text-faint); }
@@ -413,11 +415,13 @@ tbody tr:hover { background: var(--bg-elev); }
   .status {
     width: 100%;
     justify-content: space-between;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
   #last-run {
-    font-size: 0.7rem;
-    word-break: break-word;
+    font-size: 0.65rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     flex: 1;
     min-width: 0;
   }
@@ -964,6 +968,60 @@ tbody tr:hover { background: var(--bg-elev); }
 
 @media (max-width: 768px) {
   .admin-grid { grid-template-columns: 1fr; }
+}
+
+.travelers-row {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.travelers-field label {
+  display: block;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.4rem;
+}
+.travelers-field input[type="number"] {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  border-radius: 4px;
+  width: 60px;
+}
+.children-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+.child-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+.child-label {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  min-width: 60px;
+}
+.child-row .input-unit input[type="number"] {
+  width: 55px;
+}
+.child-row .tag-remove {
+  padding: 0 0.3rem;
+}
+.btn-small {
+  font-size: 0.75rem !important;
+  padding: 0.3rem 0.7rem !important;
 }
 
 /* ── end admin ────────────────────────────────────────── */

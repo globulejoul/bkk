@@ -34,6 +34,7 @@ class Config:
     currency: str = "EUR"
     currencies: list[str] = field(default_factory=lambda: ["EUR"])
     adults: int = 1
+    children: list[int] = field(default_factory=list)  # ages
     max_fly_duration_hours: int = 18
     schedule_cron: str = "0 7,19 * * *"  # 2x/day
     rolling_window_days: int = 14
@@ -69,6 +70,7 @@ def load() -> Config:
         currency=data.get("currency", "EUR"),
         currencies=data.get("currencies", ["EUR"]),
         adults=data.get("adults", 1),
+        children=data.get("children", []),
         max_fly_duration_hours=data.get("max_fly_duration_hours", 18),
         schedule_cron=data.get("schedule_cron", "0 7,19 * * *"),
         rolling_window_days=data.get("rolling_window_days", 14),

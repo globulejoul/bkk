@@ -280,6 +280,7 @@ async def config_summary():
         "origins": cfg.origins,
         "destinations": cfg.destinations,
         "adults": cfg.adults,
+        "children": cfg.children,
         "max_fly_duration_hours": cfg.max_fly_duration_hours,
         "schedule_cron": cfg.schedule_cron,
     }
@@ -299,6 +300,7 @@ class ConfigUpdate(BaseModel):
     origins: list[str]
     destinations: list[str]
     adults: int | None = None
+    children: list[int] | None = None
     max_fly_duration_hours: int | None = None
     schedule_cron: str | None = None
     trips: list[dict] | None = None
@@ -312,6 +314,8 @@ async def update_admin_config(body: ConfigUpdate):
     data["destinations"] = [d.strip().upper() for d in body.destinations if d.strip()]
     if body.adults is not None:
         data["adults"] = body.adults
+    if body.children is not None:
+        data["children"] = body.children
     if body.max_fly_duration_hours is not None:
         data["max_fly_duration_hours"] = body.max_fly_duration_hours
     if body.schedule_cron is not None:
