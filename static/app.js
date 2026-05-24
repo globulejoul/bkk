@@ -18,6 +18,7 @@ const esc = (s) => {
 };
 
 let tripChart = null;
+let _totalPax = 1; // nombre total de voyageurs, chargé au démarrage
 
 // ── Color interpolation helper ─────────────────────
 function lerpColor(a, b, t) {
@@ -113,7 +114,11 @@ $('#run-now').addEventListener('click', async () => {
 // ── Overview ────────────────────────────────────────
 
 async function loadOverview() {
-  const trips = await fetch('/api/trips').then(r => r.json());
+  const [trips, cfgSum] = await Promise.all([
+    fetch('/api/trips').then(r => r.json()),
+    fetch('/api/config-summary').then(r => r.json()),
+  ]);
+  _totalPax = (cfgSum.adults || 1) + (cfgSum.children ? cfgSum.children.length : 0);
   const grid = $('#trips-grid');
   grid.innerHTML = '';
 
@@ -175,6 +180,7 @@ function buildTripCard(t) {
     <div class="price-main ${priceClass}">
       ${priceTxt}${t.current_best != null ? '<span class="currency">€</span>' : ''}
     </div>
+    ${t.current_best != null && _totalPax > 1 ? `<div class="price-per-pax">${Math.round(t.current_best / _totalPax)}€/pers.</div>` : ''}
     <div class="price-stats">
       <span><span class="stat-label">bas</span> ${t.all_time_low != null ? Math.round(t.all_time_low) + '€' : '—'}</span>
       <span><span class="stat-label">moy 30j</span> ${t.avg_30d != null ? Math.round(t.avg_30d) + '€' : '—'}</span>

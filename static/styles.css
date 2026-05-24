@@ -191,6 +191,12 @@ h2 {
   color: var(--text-dim);
   margin-left: 0.15rem;
 }
+.trip-card .price-per-pax {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: -0.1rem;
+}
 
 .trip-card .price-stats {
   font-family: var(--mono);
