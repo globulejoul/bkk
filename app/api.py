@@ -221,6 +221,12 @@ async def get_trip_history(name: str, days: int = 60):
         return db.trip_history(c, name, days)
 
 
+@app.get("/api/trips/{name}/history-by-route")
+async def get_trip_history_by_route(name: str, days: int = 60):
+    with db.conn() as c:
+        return db.trip_history_by_route(c, name, days)
+
+
 @app.get("/api/trips/{name}/breakdown")
 async def get_trip_breakdown(name: str):
     with db.conn() as c:

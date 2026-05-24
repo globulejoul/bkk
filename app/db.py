@@ -370,17 +370,32 @@ def trips_summary(c: sqlite3.Connection) -> list[dict]:
 
 def trip_history(c: sqlite3.Connection, trip: str,
                  days: int = 60) -> list[dict]:
-    """Daily best price for a trip, across all origin/dest combinations."""
+    """Best price per run for a trip, across all origin/dest combinations."""
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     rows = c.execute("""
-        SELECT check_date,
+        SELECT captured_at,
                MIN(price_eur) AS price_eur,
                GROUP_CONCAT(DISTINCT origin) AS origins,
                GROUP_CONCAT(DISTINCT destination) AS destinations
         FROM checks
         WHERE trip_name = ? AND check_date >= ? AND price_eur IS NOT NULL
-        GROUP BY check_date
-        ORDER BY check_date
+        GROUP BY captured_at
+        ORDER BY captured_at
+    """, (trip, cutoff)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def trip_history_by_route(c: sqlite3.Connection, trip: str,
+                          days: int = 60) -> list[dict]:
+    """Best price per route per run (captured_at) for a trip."""
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    rows = c.execute("""
+        SELECT captured_at, origin, destination,
+               MIN(price_eur) AS price_eur
+        FROM checks
+        WHERE trip_name = ? AND check_date >= ? AND price_eur IS NOT NULL
+        GROUP BY captured_at, origin, destination
+        ORDER BY captured_at, origin, destination
     """, (trip, cutoff)).fetchall()
     return [dict(r) for r in rows]
 

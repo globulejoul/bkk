@@ -271,36 +271,76 @@ async function loadTripDetail() {
   const name = $('#trip-select').value;
   if (!name) return;
 
-  const [history, breakdown] = await Promise.all([
+  const [history, routeHistory, breakdown] = await Promise.all([
     fetch(`/api/trips/${encodeURIComponent(name)}/history`).then(r => r.json()),
+    fetch(`/api/trips/${encodeURIComponent(name)}/history-by-route`).then(r => r.json()),
     fetch(`/api/trips/${encodeURIComponent(name)}/breakdown`).then(r => r.json()),
   ]);
 
-  // Chart
+  // Chart with one line per route
   const ctx = $('#trip-chart').getContext('2d');
   if (tripChart) tripChart.destroy();
 
-  // Find threshold from trips list
   const trips = await fetch('/api/trips').then(r => r.json());
   const tConf = trips.find(x => x.trip_name === name) || {};
 
-  const datasets = [{
-    label: 'Prix min (€)',
-    data: history.map(p => ({ x: p.check_date, y: p.price_eur, meta: p })),
-    borderColor: '#c2a25b',
-    backgroundColor: '#c2a25b18',
-    fill: true,
-    tension: 0.3,
-    pointRadius: 3,
-    pointHoverRadius: 6,
-  }];
+  // Group route history by route key
+  const byRoute = {};
+  routeHistory.forEach(r => {
+    const key = `${r.origin} → ${r.destination}`;
+    if (!byRoute[key]) byRoute[key] = [];
+    byRoute[key].push({ x: r.captured_at, y: r.price_eur });
+  });
+
+  // Color palette for routes
+  const routeColors = [
+    '#c2a25b', '#00714c', '#d35b17', '#5b8fc2', '#8b5bc2',
+    '#c25b8f', '#5bc2a2', '#c2975b', '#5b5bc2', '#c25b5b',
+  ];
+
+  const datasets = [];
+
+  // Best overall (thicker, filled)
+  if (history.length) {
+    datasets.push({
+      label: 'Meilleur prix global',
+      data: history.map(p => ({ x: p.captured_at || p.check_date, y: p.price_eur })),
+      borderColor: '#c2a25b',
+      backgroundColor: '#c2a25b12',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 4,
+      pointHoverRadius: 7,
+      borderWidth: 2.5,
+    });
+  }
+
+  // Per-route lines
+  const routeKeys = Object.keys(byRoute).sort();
+  routeKeys.forEach((route, i) => {
+    datasets.push({
+      label: route,
+      data: byRoute[route],
+      borderColor: routeColors[i % routeColors.length],
+      backgroundColor: 'transparent',
+      fill: false,
+      tension: 0.3,
+      pointRadius: 2,
+      pointHoverRadius: 5,
+      borderWidth: 1.5,
+      borderDash: [4, 2],
+    });
+  });
+
+  // Threshold line
   if (tConf.threshold && history.length) {
     datasets.push({
       label: 'Seuil',
-      data: history.map(p => ({ x: p.check_date, y: tConf.threshold })),
+      data: history.map(p => ({ x: p.captured_at || p.check_date, y: tConf.threshold })),
       borderColor: '#00714c',
       borderDash: [6, 4],
       pointRadius: 0,
+      borderWidth: 1,
       fill: false,
     });
   }
@@ -310,25 +350,22 @@ async function loadTripDetail() {
     data: { datasets },
     options: {
       responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'nearest', intersect: false },
       plugins: {
-        legend: { labels: { color: '#464d2c', font: { family: 'JetBrains Mono' } } },
+        legend: {
+          labels: { color: '#464d2c', font: { family: 'JetBrains Mono', size: 10 },
+                    boxWidth: 12, padding: 8 },
+        },
         tooltip: {
           callbacks: {
-            label: (item) => {
-              const m = item.raw.meta;
-              if (!m) return Math.round(item.parsed.y) + '€';
-              return [
-                Math.round(item.parsed.y) + '€',
-                'Origines: ' + (m.origins || '—'),
-                'Destinations: ' + (m.destinations || '—'),
-              ];
-            },
+            label: (item) => `${item.dataset.label}: ${Math.round(item.parsed.y)}€`,
           },
         },
       },
       scales: {
-        x: { type: 'time', time: { unit: 'day' },
-             ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono' } },
+        x: { type: 'time',
+             time: { tooltipFormat: 'dd/MM HH:mm', displayFormats: { hour: 'dd/MM HH:mm', day: 'dd/MM' } },
+             ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 10 }, maxTicksLimit: 12 },
              grid: { color: '#cfcdcb' } },
         y: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono' },
                       callback: v => v + '€' },
@@ -958,7 +995,7 @@ async function loadHotelDetail() {
     data: {
       datasets: [{
         label: 'Prix (€)',
-        data: history.map(p => ({ x: p.check_date, y: p.price_eur })),
+        data: history.map(p => ({ x: p.captured_at || p.check_date, y: p.price_eur })),
         borderColor: '#c2a25b',
         backgroundColor: '#c2a25b18',
         fill: true,
