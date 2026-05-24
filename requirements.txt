@@ -4,3 +4,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 apscheduler>=3.10
 flights>=0.9.0
+playwright>=1.40

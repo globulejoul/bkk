@@ -31,6 +31,14 @@ ntfy:
   server: https://ntfy.sh
   topic: frigate-maison-jfourt
 
+# ─── Hôtels à surveiller (Google Hotels entity ID) ────────────
+hotels:
+  - name: "Chatrium Riverside Bangkok"
+    entity_id: "CgsI4tWK2cf7nNfzARAB"
+    nights: 3
+    price_threshold: 4500  # EUR total pour 3 nuits
+    enabled: true
+
 # ─── Périodes à surveiller (±3j autour de chaque borne) ────────
 trips:
 

@@ -47,6 +47,7 @@ $$('.tabs button').forEach(b => {
     if (b.dataset.tab === 'trip') loadTripDetail();
     if (b.dataset.tab === 'alerts') loadAlerts();
     if (b.dataset.tab === 'runs') loadRuns();
+    if (b.dataset.tab === 'hotels') loadHotels();
     if (b.dataset.tab === 'admin') loadAdmin();
   });
 });
@@ -797,6 +798,135 @@ async function loadFx() {
   }
 }
 
+// ── Hotels ─────────────────────────────────────────────
+
+let hotelChart = null;
+
+async function loadHotels() {
+  try {
+    const hotels = await fetch('/api/hotels').then(r => r.json());
+    const grid = $('#hotels-grid');
+    grid.innerHTML = '';
+
+    if (!hotels.length) {
+      grid.innerHTML = '<p class="dim">Aucun hôtel configuré. Ajoutez-en dans l\'onglet Admin.</p>';
+      $('#hotel-detail').style.display = 'none';
+      return;
+    }
+
+    // Populate selector
+    const sel = $('#hotel-select');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    hotels.forEach(h => {
+      const o = document.createElement('option');
+      o.value = `${h.hotel_name}|${h.trip_name}`;
+      o.textContent = `${h.hotel_name} — ${h.trip_name}`;
+      sel.appendChild(o);
+    });
+    if (prev) sel.value = prev;
+
+    hotels.forEach(h => grid.appendChild(buildHotelCard(h)));
+    $('#hotel-detail').style.display = 'block';
+    loadHotelDetail();
+  } catch (e) {
+    console.error('loadHotels error:', e);
+  }
+}
+
+function buildHotelCard(h) {
+  const card = document.createElement('div');
+  card.className = 'trip-card' + (h.current_best === null ? ' no-data' : '');
+  card.addEventListener('click', () => {
+    $('#hotel-select').value = `${h.hotel_name}|${h.trip_name}`;
+    loadHotelDetail();
+  });
+
+  let priceTxt = '— —', priceClass = 'none';
+  if (h.current_best != null) {
+    priceTxt = fmt.format(Math.round(h.current_best));
+    if (h.threshold && h.current_best <= h.threshold) priceClass = 'good';
+    else priceClass = '';
+  }
+
+  card.innerHTML = `
+    <div class="name">🏨 ${esc(h.hotel_name)}</div>
+    <div class="dates">${esc(h.trip_name)} · ${h.nights || '?'} nuits</div>
+    <div class="price-main ${priceClass}">
+      ${priceTxt}${h.current_best != null ? '<span class="currency">€</span>' : ''}
+    </div>
+    <div class="price-stats">
+      <span><span class="stat-label">bas</span> ${h.lowest_price_eur != null ? Math.round(h.lowest_price_eur) + '€' : '—'}</span>
+      <span><span class="stat-label">moy 30j</span> ${h.avg_30d != null ? Math.round(h.avg_30d) + '€' : '—'}</span>
+    </div>
+    ${h.threshold ? `<div class="threshold"><span class="dim">Seuil</span><span class="target">≤ ${h.threshold}€</span></div>` : ''}
+  `;
+  return card;
+}
+
+$('#hotel-select').addEventListener('change', loadHotelDetail);
+
+async function loadHotelDetail() {
+  const val = $('#hotel-select').value;
+  if (!val) return;
+  const [hotelName, tripName] = val.split('|');
+
+  const [history, breakdown] = await Promise.all([
+    fetch(`/api/hotels/${encodeURIComponent(hotelName)}/${encodeURIComponent(tripName)}/history`).then(r => r.json()),
+    fetch(`/api/hotels/${encodeURIComponent(hotelName)}/${encodeURIComponent(tripName)}/breakdown`).then(r => r.json()),
+  ]);
+
+  // Chart
+  const ctx = $('#hotel-chart').getContext('2d');
+  if (hotelChart) hotelChart.destroy();
+
+  hotelChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      datasets: [{
+        label: 'Prix (€)',
+        data: history.map(p => ({ x: p.check_date, y: p.price_eur })),
+        borderColor: '#c2a25b',
+        backgroundColor: '#c2a25b18',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        pointHoverRadius: 6,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#464d2c', font: { family: 'JetBrains Mono' } } } },
+      scales: {
+        x: { type: 'time', time: { unit: 'day' },
+             ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono' } },
+             grid: { color: '#cfcdcb' } },
+        y: { ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono' },
+                      callback: v => v + '€' },
+             grid: { color: '#cfcdcb' } },
+      },
+    },
+  });
+
+  // Breakdown table
+  const tbody = $('#hotel-breakdown-table tbody');
+  tbody.innerHTML = '';
+  breakdown.forEach((b, i) => {
+    const tr = document.createElement('tr');
+    if (i === 0) tr.classList.add('best-row');
+    tr.innerHTML = `
+      <td>${esc(b.source)}</td>
+      <td class="price-cell">${Math.round(b.best_eur)}€</td>
+      <td>${esc(b.currency)}</td>
+      <td>${dateFmt(b.last_seen)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  if (!breakdown.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="dim">Pas encore de données.</td></tr>';
+  }
+}
+
 // ── Admin ──────────────────────────────────────────────
 
 let _adminConfig = null;
@@ -808,6 +938,7 @@ async function loadAdmin() {
     renderDestinations();
     renderTravelers();
     renderTrips();
+    renderHotelsAdmin();
     $('#admin-status').textContent = '';
   } catch (e) {
     $('#admin-status').textContent = 'Erreur chargement config';
@@ -932,6 +1063,83 @@ function renderTravelers() {
   });
 }
 
+function renderHotelsAdmin() {
+  const container = $('#admin-hotels');
+  if (!_adminConfig) return;
+  const htls = _adminConfig.hotels || [];
+  container.innerHTML = '';
+
+  if (!htls.length) {
+    container.innerHTML = '<span class="dim" style="font-size:0.8rem">Aucun hôtel configuré</span>';
+    return;
+  }
+
+  htls.forEach((h, idx) => {
+    const card = document.createElement('div');
+    card.className = 'trip-edit-card' + (h.enabled === false ? ' trip-disabled' : '');
+    card.innerHTML = `
+      <div class="trip-edit-header">
+        <label class="toggle" title="${h.enabled !== false ? 'Désactiver' : 'Activer'}">
+          <input type="checkbox" ${h.enabled !== false ? 'checked' : ''} data-hotel-toggle="${idx}">
+          <span class="toggle-slider"></span>
+        </label>
+        <span class="trip-edit-name">${esc(h.name)}</span>
+        <button class="tag-remove" data-remove-hotel="${idx}" title="Supprimer">\u00d7</button>
+      </div>
+      <div class="trip-edit-row">
+        <label for="hotel-${idx}-entity">Entity ID</label>
+        <input type="text" id="hotel-${idx}-entity" name="hotel-${idx}-entity"
+               value="${esc(h.entity_id)}" data-hotel="${idx}" data-field="entity_id"
+               style="font-size:0.7rem;width:220px">
+      </div>
+      <div class="trip-edit-row">
+        <label for="hotel-${idx}-nights">Nuits</label>
+        <input type="number" id="hotel-${idx}-nights" name="hotel-${idx}-nights"
+               value="${h.nights || 3}" min="1" max="30" data-hotel="${idx}" data-field="nights"
+               style="width:60px">
+        <label for="hotel-${idx}-threshold" style="margin-left:1rem">Seuil</label>
+        <div class="input-unit">
+          <input type="number" id="hotel-${idx}-threshold" name="hotel-${idx}-threshold"
+                 value="${h.price_threshold || ''}" placeholder="4500" data-hotel="${idx}" data-field="price_threshold">
+          <span class="unit">\u20ac</span>
+        </div>
+      </div>
+    `;
+    // Event listeners
+    card.querySelectorAll('input[data-field]').forEach(input => {
+      input.addEventListener('change', () => {
+        const ht = _adminConfig.hotels[input.dataset.hotel];
+        const f = input.dataset.field;
+        if (f === 'entity_id') ht.entity_id = input.value;
+        else if (f === 'nights') ht.nights = parseInt(input.value, 10) || 3;
+        else if (f === 'price_threshold') ht.price_threshold = input.value ? parseInt(input.value, 10) : null;
+      });
+    });
+    card.querySelector('input[data-hotel-toggle]').addEventListener('change', (e) => {
+      _adminConfig.hotels[idx].enabled = e.target.checked;
+      card.classList.toggle('trip-disabled', !e.target.checked);
+    });
+    card.querySelector('button[data-remove-hotel]').addEventListener('click', () => {
+      _adminConfig.hotels.splice(idx, 1);
+      renderHotelsAdmin();
+    });
+    container.appendChild(card);
+  });
+}
+
+function addHotel() {
+  const nameInput = $('#add-hotel-name');
+  const entityInput = $('#add-hotel-entity');
+  const name = nameInput.value.trim();
+  const entity = entityInput.value.trim();
+  if (!name || !entity) return;
+  if (!_adminConfig.hotels) _adminConfig.hotels = [];
+  _adminConfig.hotels.push({ name, entity_id: entity, nights: 3, enabled: true });
+  renderHotelsAdmin();
+  nameInput.value = '';
+  entityInput.value = '';
+}
+
 // Dates officielles vacances scolaires Zone A (Lyon) 2026-2027
 const VACANCES_ZONE_A = {
   'Toussaint 2026':       ['2026-10-17', '2026-11-02'],
@@ -1037,6 +1245,7 @@ async function saveConfig() {
 $('#btn-add-origin').addEventListener('click', addOrigin);
 $('#btn-add-dest').addEventListener('click', addDestination);
 $('#admin-save').addEventListener('click', saveConfig);
+$('#btn-add-hotel').addEventListener('click', addHotel);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id === 'add-origin') addOrigin();
   if (e.key === 'Enter' && e.target.id === 'add-dest') addDestination();

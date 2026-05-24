@@ -73,6 +73,37 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
     """),
     (2, "ALTER TABLE state ADD COLUMN flash_until TEXT;"),
+    (3, """
+        CREATE TABLE IF NOT EXISTS hotel_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            check_date TEXT NOT NULL,
+            trip_name TEXT NOT NULL,
+            hotel_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            price_local REAL NOT NULL,
+            currency TEXT NOT NULL,
+            price_eur REAL,
+            checkin_date TEXT NOT NULL,
+            checkout_date TEXT NOT NULL,
+            nights INTEGER,
+            booking_url TEXT,
+            captured_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hc_trip ON hotel_checks(trip_name);
+        CREATE INDEX IF NOT EXISTS idx_hc_date ON hotel_checks(check_date);
+        CREATE INDEX IF NOT EXISTS idx_hc_hotel ON hotel_checks(hotel_name);
+
+        CREATE TABLE IF NOT EXISTS hotel_state (
+            hotel_name TEXT NOT NULL,
+            trip_name TEXT NOT NULL,
+            lowest_price_eur REAL,
+            lowest_seen_date TEXT,
+            lowest_source TEXT,
+            rolling_json TEXT,
+            last_check_at TEXT,
+            PRIMARY KEY (hotel_name, trip_name)
+        );
+    """),
 ]
 
 
@@ -394,4 +425,115 @@ def last_runs(c: sqlite3.Connection, limit: int = 10) -> list[dict]:
     rows = c.execute(
         "SELECT * FROM run_log ORDER BY started_at DESC LIMIT ?", (limit,)
     ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Hotel queries ──────────────────────────────────────────────
+
+def insert_hotel_check(c: sqlite3.Connection, row: dict[str, Any]) -> None:
+    c.execute(
+        """INSERT INTO hotel_checks (
+            check_date, trip_name, hotel_name, source,
+            price_local, currency, price_eur,
+            checkin_date, checkout_date, nights,
+            booking_url, captured_at
+        ) VALUES (
+            :check_date, :trip_name, :hotel_name, :source,
+            :price_local, :currency, :price_eur,
+            :checkin_date, :checkout_date, :nights,
+            :booking_url, :captured_at
+        )""",
+        row,
+    )
+
+
+def get_hotel_state(c: sqlite3.Connection, hotel: str,
+                    trip: str) -> dict[str, Any] | None:
+    row = c.execute(
+        "SELECT * FROM hotel_state WHERE hotel_name=? AND trip_name=?",
+        (hotel, trip),
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("rolling_json"):
+        d["rolling"] = json.loads(d["rolling_json"])
+    return d
+
+
+def upsert_hotel_state(c: sqlite3.Connection, hotel: str,
+                       trip: str, **kwargs) -> None:
+    if "rolling" in kwargs:
+        kwargs["rolling_json"] = json.dumps(kwargs.pop("rolling"))
+    current = c.execute(
+        "SELECT 1 FROM hotel_state WHERE hotel_name=? AND trip_name=?",
+        (hotel, trip),
+    ).fetchone()
+    if current:
+        sets = ", ".join(f"{k}=:{k}" for k in kwargs)
+        c.execute(
+            f"UPDATE hotel_state SET {sets} "
+            "WHERE hotel_name=:hotel AND trip_name=:trip",
+            {**kwargs, "hotel": hotel, "trip": trip},
+        )
+    else:
+        cols = ["hotel_name", "trip_name"] + list(kwargs.keys())
+        vals = ["?"] * len(cols)
+        c.execute(
+            f"INSERT INTO hotel_state ({','.join(cols)}) VALUES ({','.join(vals)})",
+            (hotel, trip, *kwargs.values()),
+        )
+
+
+def hotel_summary(c: sqlite3.Connection) -> list[dict]:
+    """Summary of all monitored hotels per trip."""
+    rows = c.execute("""
+        SELECT hs.hotel_name, hs.trip_name,
+               hs.lowest_price_eur, hs.lowest_seen_date, hs.lowest_source,
+               hs.last_check_at,
+               (SELECT MIN(price_eur) FROM hotel_checks
+                WHERE hotel_name = hs.hotel_name AND trip_name = hs.trip_name
+                AND check_date = (SELECT MAX(check_date) FROM hotel_checks
+                                  WHERE hotel_name = hs.hotel_name
+                                  AND trip_name = hs.trip_name)
+               ) AS current_best,
+               (SELECT AVG(price_eur) FROM hotel_checks
+                WHERE hotel_name = hs.hotel_name AND trip_name = hs.trip_name
+                AND check_date >= date('now', '-30 days')
+               ) AS avg_30d
+        FROM hotel_state hs
+        ORDER BY hs.trip_name
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def hotel_history(c: sqlite3.Connection, hotel: str, trip: str,
+                  days: int = 60) -> list[dict]:
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    rows = c.execute("""
+        SELECT check_date, MIN(price_eur) AS price_eur,
+               GROUP_CONCAT(DISTINCT source) AS sources
+        FROM hotel_checks
+        WHERE hotel_name = ? AND trip_name = ? AND check_date >= ?
+          AND price_eur IS NOT NULL
+        GROUP BY check_date
+        ORDER BY check_date
+    """, (hotel, trip, cutoff)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def hotel_breakdown(c: sqlite3.Connection, hotel: str,
+                    trip: str) -> list[dict]:
+    """Best price per provider for a hotel/trip."""
+    rows = c.execute("""
+        SELECT source, MIN(price_eur) AS best_eur,
+               price_local, currency, booking_url,
+               MAX(check_date) AS last_seen
+        FROM hotel_checks
+        WHERE hotel_name = ? AND trip_name = ?
+          AND price_eur IS NOT NULL
+          AND check_date >= date('now', '-30 days')
+        GROUP BY source
+        ORDER BY best_eur ASC
+    """, (hotel, trip)).fetchall()
     return [dict(r) for r in rows]

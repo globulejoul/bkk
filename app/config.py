@@ -22,6 +22,15 @@ class Trip:
 
 
 @dataclass
+class HotelWatch:
+    name: str
+    entity_id: str
+    nights: int = 3
+    price_threshold: float | None = None
+    enabled: bool = True
+
+
+@dataclass
 class NtfyConfig:
     server: str = "https://ntfy.sh"
     topic: str | None = None
@@ -41,6 +50,7 @@ class Config:
     rise_threshold_pct: float = 0.10
     ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     trips: list[Trip] = field(default_factory=list)
+    hotels: list[HotelWatch] = field(default_factory=list)
     # VPN proxy URL (set via env, not in config)
     vpn_proxy_url: str | None = None
 
@@ -80,6 +90,16 @@ def load() -> Config:
             topic=ntfy_data.get("topic"),
         ),
         trips=trips,
+        hotels=[
+            HotelWatch(
+                name=h["name"],
+                entity_id=h["entity_id"],
+                nights=h.get("nights", 3),
+                price_threshold=h.get("price_threshold"),
+                enabled=h.get("enabled", True),
+            )
+            for h in data.get("hotels", [])
+        ],
     )
 
 

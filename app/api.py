@@ -339,6 +339,47 @@ async def update_admin_config(body: ConfigUpdate):
     return {"status": "ok"}
 
 
+# ── Hotels API ───────────────────────────────────────────────
+
+@app.get("/api/hotels")
+async def get_hotels():
+    cfg = config.load()
+    with db.conn() as c:
+        summary = db.hotel_summary(c)
+    by_name = {h.name: h for h in cfg.hotels}
+    for s in summary:
+        h = by_name.get(s["hotel_name"])
+        if h:
+            s["nights"] = h.nights
+            s["threshold"] = h.price_threshold
+            s["enabled"] = h.enabled
+    # Add hotels from config that have no data yet
+    have = {(s["hotel_name"], s["trip_name"]) for s in summary}
+    for h in cfg.hotels:
+        for t in cfg.trips:
+            if (h.name, t.name) not in have:
+                summary.append({
+                    "hotel_name": h.name, "trip_name": t.name,
+                    "current_best": None, "lowest_price_eur": None,
+                    "avg_30d": None, "last_check_at": None,
+                    "nights": h.nights, "threshold": h.price_threshold,
+                    "enabled": h.enabled,
+                })
+    return summary
+
+
+@app.get("/api/hotels/{hotel_name}/{trip_name}/history")
+async def get_hotel_history(hotel_name: str, trip_name: str, days: int = 60):
+    with db.conn() as c:
+        return db.hotel_history(c, hotel_name, trip_name, days)
+
+
+@app.get("/api/hotels/{hotel_name}/{trip_name}/breakdown")
+async def get_hotel_breakdown(hotel_name: str, trip_name: str):
+    with db.conn() as c:
+        return db.hotel_breakdown(c, hotel_name, trip_name)
+
+
 @app.get("/api/fx-history")
 async def fx_history(months: int = 6):
     """EUR/THB history proxied to avoid CORS."""

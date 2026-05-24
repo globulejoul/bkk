@@ -745,6 +745,26 @@ tbody tr:hover { background: var(--bg-elev); }
   font-weight: 600;
 }
 
+/* ── Hotels tab ──────────────────────────────────────── */
+
+#hotels-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.hotel-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2rem;
+}
+@media (min-width: 1024px) {
+  .hotel-detail-grid {
+    grid-template-columns: 1.4fr 1fr;
+  }
+}
+
 /* ── Admin page ───────────────────────────────────────── */
 
 .admin-grid {

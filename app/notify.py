@@ -201,3 +201,46 @@ def _body_rise(a: dict) -> str:
         f"{a['airlines']} • {a['origin']} → {a['destination']}\n\n"
         f"Si tu visais cette période, le bas pourrait être derrière toi."
     )
+
+
+def send_hotel_ntfy(cfg: Config, alert: dict) -> None:
+    """Notification ntfy pour les alertes hôtel."""
+    if not cfg.ntfy.topic:
+        return
+    server = cfg.ntfy.server.rstrip("/")
+    url = f"{server}/{cfg.ntfy.topic}"
+    token = os.environ.get("NTFY_TOKEN")
+
+    tag = "🎯 SEUIL" if alert.get("hit_threshold") else "📉 PRIX BAS"
+    title = f"🏨 {alert['price']:.0f}€ — {alert['hotel']}"
+    body_lines = [
+        f"**{tag}** — {alert['price']:.0f}€ ({alert['nights']} nuits)",
+        f"{alert['hotel']}",
+        f"{alert['checkin']} → {alert['checkout']} • {alert['trip']}",
+        f"Source: {alert['source']}",
+    ]
+    prev = alert.get("previous_low")
+    if prev:
+        body_lines.append(f"Précédent bas: {prev:.0f}€")
+
+    providers = alert.get("providers") or []
+    if providers:
+        body_lines.append("")
+        body_lines.append("**Comparaison providers:**")
+        for p in sorted(providers, key=lambda x: x["price"]):
+            body_lines.append(f"• {p['source']}: {p['price']:.0f} {p['currency']}")
+
+    headers = {
+        "Title": title.encode("utf-8"),
+        "Tags": "hotel,chart_with_downwards_trend",
+        "Priority": "high" if alert.get("hit_threshold") else "default",
+        "Markdown": "yes",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        requests.post(url, data="\n".join(body_lines).encode("utf-8"),
+                      headers=headers, timeout=15)
+    except Exception as e:
+        print(f"  ntfy hotel error: {e}")

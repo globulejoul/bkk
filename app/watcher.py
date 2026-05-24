@@ -5,7 +5,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from app import db, fx, notify, sources
+from app import db, fx, hotels, notify, sources
 from app.config import Config
 
 
@@ -124,6 +124,20 @@ def run_once(cfg: Config) -> dict[str, Any]:
             except Exception as e:
                 summary["errors"].append(f"{trip.name}: {e}")
                 print(f"  ❌ {trip.name}: {e}")
+
+        # Hotel checks
+        for hotel in cfg.hotels:
+            if not hotel.enabled:
+                print(f"  ⏸ Hotel {hotel.name}: désactivé, skip")
+                continue
+            for trip in cfg.trips:
+                if not trip.enabled:
+                    continue
+                try:
+                    _check_hotel(cfg, hotel, trip, rates)
+                except Exception as e:
+                    summary["errors"].append(f"Hotel {hotel.name}/{trip.name}: {e}")
+                    print(f"  ❌ Hotel {hotel.name}/{trip.name}: {e}")
 
         with db.conn() as c:
             db.finish_run(c, run_id, "ok", summary["trips_checked"],
@@ -562,6 +576,110 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
         print("  Open-jaw: aucune combinaison trouvée")
 
     return best_oj
+
+
+def _check_hotel(cfg: Config, hotel, trip, rates: dict[str, float]) -> None:
+    """Check hotel prices for one trip period."""
+    today = date.today().isoformat()
+    now = datetime.now().isoformat()
+
+    # Checkin = début fenêtre aller, checkout = checkin + nights
+    checkin = trip.outbound_window[0]
+    checkin_dt = datetime.strptime(checkin, "%Y-%m-%d")
+    checkout_dt = checkin_dt + timedelta(days=hotel.nights)
+    checkout = checkout_dt.strftime("%Y-%m-%d")
+
+    print(f"\n→ Hotel {hotel.name} pour {trip.name}: {checkin} → {checkout}")
+
+    result = hotels.search_hotel(
+        entity_id=hotel.entity_id,
+        checkin=checkin,
+        checkout=checkout,
+        adults=cfg.adults,
+        children=cfg.children if cfg.children else None,
+        currency=cfg.currency,
+    )
+
+    if not result or not result.prices:
+        print(f"  ⚠ Aucun prix trouvé pour {hotel.name}")
+        return
+
+    # Persist tous les prix par provider
+    with db.conn() as c:
+        for hp in result.prices:
+            price_eur = hp.price if hp.currency == "EUR" else fx.to_eur(
+                hp.price, hp.currency, rates)
+            db.insert_hotel_check(c, {
+                "check_date": today,
+                "trip_name": trip.name,
+                "hotel_name": hotel.name,
+                "source": hp.source,
+                "price_local": hp.price,
+                "currency": hp.currency,
+                "price_eur": price_eur,
+                "checkin_date": checkin,
+                "checkout_date": checkout,
+                "nights": hotel.nights,
+                "booking_url": hp.url,
+                "captured_at": now,
+            })
+
+        # State update
+        best_eur = None
+        if result.best_price is not None:
+            best_eur = (result.best_price if result.best_currency == "EUR"
+                        else fx.to_eur(result.best_price, result.best_currency,
+                                       rates))
+
+        if best_eur is None:
+            return
+
+        state = db.get_hotel_state(c, hotel.name, trip.name) or {}
+        prev_low = state.get("lowest_price_eur")
+
+        rolling = state.get("rolling") or []
+        rolling = [x for x in rolling if x[0] != today]
+        rolling.append([today, best_eur])
+        cutoff = (date.today()
+                  - timedelta(days=cfg.rolling_window_days)).isoformat()
+        rolling = [x for x in rolling if x[0] >= cutoff]
+
+        new_low = prev_low is None or best_eur < prev_low - 0.5
+        hit_threshold = (hotel.price_threshold is not None
+                         and best_eur <= hotel.price_threshold)
+
+        update = {"rolling": rolling, "last_check_at": now}
+        if new_low or prev_low is None:
+            update.update({
+                "lowest_price_eur": best_eur,
+                "lowest_seen_date": today,
+                "lowest_source": result.best_source,
+            })
+        db.upsert_hotel_state(c, hotel.name, trip.name, **update)
+
+    # Alertes
+    if new_low or hit_threshold:
+        payload = {
+            "kind": "hotel_low",
+            "hotel": hotel.name,
+            "trip": trip.name,
+            "price": best_eur,
+            "previous_low": prev_low,
+            "hit_threshold": hit_threshold,
+            "source": result.best_source,
+            "checkin": checkin,
+            "checkout": checkout,
+            "nights": hotel.nights,
+            "providers": [
+                {"source": p.source, "price": p.price, "currency": p.currency}
+                for p in result.prices
+            ],
+        }
+        notify.send_hotel_ntfy(cfg, payload)
+        with db.conn() as c:
+            db.log_alert(c, trip.name, "hotel_low", best_eur, payload)
+        tag = "🎯 SEUIL" if hit_threshold else "📉 BAS"
+        print(f"  🏨 {tag} Hotel alert: {best_eur:.0f}€ ({result.best_source})")
 
 
 def _build_cross_checks(cfg: Config, best: sources.FlightResult,
