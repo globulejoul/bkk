@@ -819,7 +819,12 @@ function renderOrigins() {
   (_adminConfig.origins || []).forEach((o, i) => {
     const tag = document.createElement('span');
     tag.className = 'tag';
-    tag.innerHTML = `${esc(o)}<button class="tag-remove" onclick="removeOrigin(${i})">\u00d7</button>`;
+    tag.textContent = o;
+    const btn = document.createElement('button');
+    btn.className = 'tag-remove';
+    btn.textContent = '\u00d7';
+    btn.addEventListener('click', () => { _adminConfig.origins.splice(i, 1); renderOrigins(); });
+    tag.appendChild(btn);
     container.appendChild(tag);
   });
 }
@@ -830,7 +835,12 @@ function renderDestinations() {
   (_adminConfig.destinations || []).forEach((d, i) => {
     const tag = document.createElement('span');
     tag.className = 'tag';
-    tag.innerHTML = `${esc(d)}<button class="tag-remove" onclick="removeDestination(${i})">\u00d7</button>`;
+    tag.textContent = d;
+    const btn = document.createElement('button');
+    btn.className = 'tag-remove';
+    btn.textContent = '\u00d7';
+    btn.addEventListener('click', () => { _adminConfig.destinations.splice(i, 1); renderDestinations(); });
+    tag.appendChild(btn);
     container.appendChild(tag);
   });
 }
@@ -877,34 +887,33 @@ function renderTrips() {
       <div class="trip-edit-name">${esc(trip.name)}</div>
       <div class="trip-edit-row">
         <label>Aller du</label>
-        <input type="date" value="${ow[0]}" onchange="updateTrip(${idx},'ow0',this.value)">
-        <input type="date" value="${ow[1]}" onchange="updateTrip(${idx},'ow1',this.value)">
+        <input type="date" data-trip="${idx}" data-field="ow0" value="${ow[0]}">
+        <input type="date" data-trip="${idx}" data-field="ow1" value="${ow[1]}">
       </div>
       <div class="trip-edit-row">
         <label>Retour du</label>
-        <input type="date" value="${rw[0]}" onchange="updateTrip(${idx},'rw0',this.value)">
-        <input type="date" value="${rw[1]}" onchange="updateTrip(${idx},'rw1',this.value)">
+        <input type="date" data-trip="${idx}" data-field="rw0" value="${rw[0]}">
+        <input type="date" data-trip="${idx}" data-field="rw1" value="${rw[1]}">
       </div>
       <div class="trip-edit-row">
         <label>Seuil alerte</label>
-        <input type="number" value="${trip.price_threshold || ''}" placeholder="ex: 800"
-               onchange="updateTrip(${idx},'threshold',this.value)">
+        <input type="number" data-trip="${idx}" data-field="threshold" value="${trip.price_threshold || ''}" placeholder="ex: 800">
         <span class="dim" style="font-size:0.75rem">\u20ac</span>
       </div>
     `;
+    card.querySelectorAll('input').forEach(input => {
+      input.addEventListener('change', () => {
+        const t = _adminConfig.trips[input.dataset.trip];
+        const f = input.dataset.field;
+        if (f === 'ow0') t.outbound_window[0] = input.value;
+        else if (f === 'ow1') t.outbound_window[1] = input.value;
+        else if (f === 'rw0') t.return_window[0] = input.value;
+        else if (f === 'rw1') t.return_window[1] = input.value;
+        else if (f === 'threshold') t.price_threshold = input.value ? parseInt(input.value, 10) : null;
+      });
+    });
     container.appendChild(card);
   });
-}
-
-function updateTrip(idx, field, value) {
-  const trip = _adminConfig.trips[idx];
-  if (field === 'ow0') trip.outbound_window[0] = value;
-  else if (field === 'ow1') trip.outbound_window[1] = value;
-  else if (field === 'rw0') trip.return_window[0] = value;
-  else if (field === 'rw1') trip.return_window[1] = value;
-  else if (field === 'threshold') {
-    trip.price_threshold = value ? parseInt(value, 10) : null;
-  }
 }
 
 async function saveConfig() {
@@ -937,7 +946,10 @@ async function saveConfig() {
   }
 }
 
-// Enter key support for tag inputs
+// Admin button bindings
+$('#btn-add-origin').addEventListener('click', addOrigin);
+$('#btn-add-dest').addEventListener('click', addDestination);
+$('#admin-save').addEventListener('click', saveConfig);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id === 'add-origin') addOrigin();
   if (e.key === 'Enter' && e.target.id === 'add-dest') addDestination();
