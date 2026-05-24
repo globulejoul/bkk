@@ -10,9 +10,10 @@ Stack : Docker · Python · FastAPI · SQLite · fli (Google Flights) · Duffel 
 
 | | |
 |---|---|
-| **Dashboard web** | UI temps réel avec courbes, heatmap calendrier, breakdown par aéroport |
+| **Dashboard web** | Cartes par période avec sparklines, prix/personne, courbes d'évolution par route |
 | **Google Flights + compagnies directes** | fli (API reverse-engineered) + Duffel (300+ compagnies) |
-| **Toutes les combinaisons dates** | Scan ±N jours aller × ±N jours retour (configurable) |
+| **Toutes les combinaisons dates** | Scan ±N jours aller × ±N jours retour (configurable via admin) |
+| **Graphique multi-routes** | Une courbe par route (CDG→BKK, LYS→HKT...) à chaque run, sélecteur 30j/60j/90j/tout |
 | **Score achat 0-100** | Composite percentile + tendance + jour semaine + délai départ |
 | **Flash mode** | Checks toutes les 5 min pendant 48h quand le seuil est atteint |
 | **Comparaison A/R vs 2 allers simples** | Détecte si 2 OW est moins cher |
@@ -22,19 +23,21 @@ Stack : Docker · Python · FastAPI · SQLite · fli (Google Flights) · Duffel 
 
 | | |
 |---|---|
-| **Google Hotels via Playwright** | Scraping Chromium headless, compare les prix par provider |
+| **Google Hotels via Playwright** | Scraping Chromium headless, recherche par nom d'hôtel |
 | **Multi-providers** | Booking.com, Agoda, Expedia, Hotels.com, Trip.com, Traveloka, eDreams... |
-| **Dates flexibles** | Check-in / check-out configurables indépendamment des vols |
+| **Dates indépendantes** | Check-in / check-out configurables indépendamment des vols |
 | **Alertes prix** | Notification quand le prix passe sous le seuil configuré |
 
 ### Général
 
 | | |
 |---|---|
-| **Page Admin** | Configuration aéroports, voyageurs (adultes + enfants), dates, hôtels, seuils |
+| **Page Admin** | Aéroports, voyageurs (adultes + enfants), périodes on/off, hôtels, seuils, durée vol max |
+| **Prix par personne** | Affiché sur chaque carte quand >1 voyageur |
+| **Sparklines** | Mini courbes 30j directement sur les cartes de la vue d'ensemble |
 | **Météo Bangkok + cours EUR/THB** | Directement dans le dashboard |
-| **Notifications ntfy** | Avec tendance, score, comparaisons marchés |
-| **Watchdog** | Détecte les runs bloqués et libère le scheduler automatiquement |
+| **Notifications ntfy** | Vols : tendance, score, comparaisons. Hôtels : prix par provider |
+| **Watchdog** | Détecte les runs bloqués (>15min), libère le scheduler, reset les locks fantômes |
 
 ## Architecture
 
@@ -79,8 +82,9 @@ Le fichier `config.example.yml` sert de référence. `config.yml` est gitignored
 
 - `origins` / `destinations` : aéroports IATA
 - `adults` / `children` : nombre de voyageurs et âges des enfants
+- `max_fly_duration_hours` : durée de vol max acceptée
 - `schedule_cron` : fréquence des checks (`"0 */6 * * *"` = toutes les 6h)
-- `trips[].price_threshold` : seuil alerte vol
+- `trips[]` : périodes de vacances avec fenêtres dates, seuil, toggle on/off
 - `hotels[]` : hôtels à surveiller avec dates check-in/check-out et seuil
 
 Tous ces paramètres sont aussi modifiables depuis la **page Admin** du dashboard.
@@ -111,13 +115,13 @@ App ntfy → ajouter le topic configuré dans `config.yml` (serveur `https://ntf
 
 ## Dashboard
 
-**Vue d'ensemble** : carte par période avec prix actuel, plus bas/moyenne/plus haut, seuil cible, badges tendance et score achat. Météo Bangkok et cours EUR/THB.
+**Vue d'ensemble** : carte par période avec prix actuel, prix/personne, sparkline 30j, plus bas/moyenne/plus haut, seuil cible, badges tendance et score achat. Météo Bangkok et cours EUR/THB.
 
-**Détail période** : courbe d'évolution, tableau des meilleurs prix par combinaison (origine × destination × source × dates), heatmap calendrier, statistiques (tendance, score, prix moyen par jour).
+**Détail période** : graphique multi-courbes (une ligne par route à chaque run, sélecteur 30j/60j/90j/tout), tableau des meilleurs prix par combinaison (origine × destination × source × dates), heatmap calendrier, statistiques (tendance, score, prix moyen par jour).
 
 **Hôtels** : prix actuel par provider, historique, comparaison Booking vs Agoda vs Expedia, etc.
 
-**Admin** : aéroports de départ/arrivée, voyageurs (adultes + enfants avec âges), périodes de vacances avec toggle on/off et flexibilité des dates, hôtels surveillés avec dates et seuils, durée de vol max.
+**Admin** : aéroports de départ/arrivée, voyageurs (adultes + enfants avec âges), durée vol max, périodes de vacances avec dates officielles Zone A, toggle on/off et flexibilité des dates, hôtels surveillés avec dates et seuils.
 
 **Alertes** : historique avec contexte complet.
 
