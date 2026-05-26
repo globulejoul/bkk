@@ -236,7 +236,30 @@ async def get_trip_breakdown(name: str):
 @app.get("/api/trips/{name}/heatmap")
 async def get_trip_heatmap(name: str):
     with db.conn() as c:
-        return db.heatmap_data(c, name)
+        flat = db.heatmap_data(c, name)
+    if not flat:
+        return {"outbound_dates": [], "return_dates": [], "prices": []}
+    # Build 2D matrix expected by frontend
+    out_set: dict[str, int] = {}
+    ret_set: dict[str, int] = {}
+    for row in flat:
+        od = row["outbound_date"]
+        rd = row["return_date"]
+        if od and od not in out_set:
+            out_set[od] = len(out_set)
+        if rd and rd not in ret_set:
+            ret_set[rd] = len(ret_set)
+    outbound_dates = sorted(out_set.keys())
+    return_dates = sorted(ret_set.keys())
+    out_idx = {d: i for i, d in enumerate(outbound_dates)}
+    ret_idx = {d: i for i, d in enumerate(return_dates)}
+    prices = [[None] * len(return_dates) for _ in range(len(outbound_dates))]
+    for row in flat:
+        od, rd = row["outbound_date"], row["return_date"]
+        if od in out_idx and rd in ret_idx:
+            prices[out_idx[od]][ret_idx[rd]] = row["best_eur"]
+    return {"outbound_dates": outbound_dates, "return_dates": return_dates,
+            "prices": prices}
 
 
 @app.get("/api/trips/{name}/stats")
