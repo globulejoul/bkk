@@ -566,6 +566,15 @@ async function loadTripStats(tripName) {
         </div>`;
     }
 
+    // Score history sparkline
+    if (stats.score_history && stats.score_history.length >= 2) {
+      html += `
+        <div class="stats-score-history">
+          <div class="dow-title">Évolution score d'achat</div>
+          <canvas id="score-history-chart" class="score-history-canvas"></canvas>
+        </div>`;
+    }
+
     // Day of week chart
     if (stats.day_of_week && Object.keys(stats.day_of_week).length) {
       const dow = stats.day_of_week; // object like {0: avg, 1: avg, ...} or {dim: avg, ...}
@@ -617,9 +626,63 @@ async function loadTripStats(tripName) {
 
     html += '</div>';
     container.innerHTML = html;
+
+    // Render score history chart after DOM injection
+    if (stats.score_history && stats.score_history.length >= 2) {
+      _renderScoreHistory(stats.score_history);
+    }
   } catch (e) {
     container.innerHTML = '<div class="stats-no-data">Pas de données statistiques disponibles.</div>';
   }
+}
+
+let _scoreChart = null;
+function _renderScoreHistory(data) {
+  const canvas = document.getElementById('score-history-chart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (_scoreChart) _scoreChart.destroy();
+
+  _scoreChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      datasets: [{
+        label: 'Score d\'achat',
+        data: data.map(d => ({ x: d.date, y: d.score })),
+        borderColor: '#c2a25b',
+        backgroundColor: '#c2a25b18',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        pointHoverRadius: 6,
+        pointBackgroundColor: data.map(d => scoreColor(d.score)),
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const d = data[item.dataIndex];
+              return `Score: ${d.score}/100 (${Math.round(d.price)}€)`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { type: 'time', time: { unit: 'day' },
+             ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 8 },
+             grid: { display: false } },
+        y: { min: 0, max: 100,
+             ticks: { color: '#a8a8a2', font: { family: 'JetBrains Mono', size: 9 },
+                      stepSize: 25, callback: v => v },
+             grid: { color: '#cfcdcb' } },
+      },
+    },
+  });
 }
 
 // ── Card indicators (overview) ────────────────────

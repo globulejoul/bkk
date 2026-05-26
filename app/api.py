@@ -287,10 +287,28 @@ async def get_trip_stats(name: str):
                 current_price, trip, cfg, rates, pct, trend,
             )
 
+    # Buy score history: compute score for each historical price point
+    score_history = []
+    with db.conn() as c:
+        hist = db.price_trend(c, name, days=30)
+        if len(hist) >= 2:
+            from app import fx
+            rates = fx.fetch_rates(cfg.currency, ["THB"])
+            for i in range(len(hist)):
+                sub = hist[:i + 1]
+                t_trend = watcher._calc_trend(sub)
+                price = sub[-1][1]
+                pct_i = db.percentile_rank(c, name, price)
+                score_i = watcher._calc_buy_score(
+                    price, trip, cfg, rates, pct_i, t_trend)
+                score_history.append({
+                    "date": sub[-1][0], "score": score_i, "price": price})
+
     return {
         "day_of_week": dow_stats,
         "trend": trend,
         "buy_score": buy_score,
+        "score_history": score_history,
     }
 
 
