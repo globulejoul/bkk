@@ -730,8 +730,8 @@ tbody tr:hover { background: var(--bg-elev); }
 .stats-score-history {
   font-family: var(--mono);
 }
-.score-history-canvas {
-  width: 100%;
+.score-history-wrap {
+  position: relative;
   height: 100px;
 }
 

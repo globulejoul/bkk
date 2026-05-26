@@ -571,7 +571,7 @@ async function loadTripStats(tripName) {
       html += `
         <div class="stats-score-history">
           <div class="dow-title">Évolution score d'achat</div>
-          <canvas id="score-history-chart" class="score-history-canvas"></canvas>
+          <div class="score-history-wrap"><canvas id="score-history-chart"></canvas></div>
         </div>`;
     }
 
