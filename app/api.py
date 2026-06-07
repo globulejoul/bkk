@@ -378,6 +378,7 @@ class ConfigUpdate(BaseModel):
     max_fly_duration_hours: int | None = None
     schedule_cron: str | None = None
     trips: list[dict] | None = None
+    hotels: list[dict] | None = None
 
 
 @app.put("/api/admin/config")
@@ -396,6 +397,8 @@ async def update_admin_config(body: ConfigUpdate):
         data["schedule_cron"] = body.schedule_cron
     if body.trips is not None:
         data["trips"] = body.trips
+    if body.hotels is not None:
+        data["hotels"] = body.hotels
     try:
         config.save_raw(data)
     except ValueError as e:
