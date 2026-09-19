@@ -314,9 +314,12 @@ async def lifespan(app: FastAPI):
                       id="watchdog", max_instances=1, coalesce=True)
     scheduler.add_listener(_on_job_skipped,
                            EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES)
+    # uvicorn installe ses handlers après l import du module : le niveau
+    # posé dans app/__init__.py serait écrasé. On le repose au démarrage.
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     scheduler.start()
     flash_txt = "flash 5min" if flash_on else "flash OFF (pas de clé Duffel)"
-    log.error(f"Scheduler started: {cfg.schedule_cron} + {flash_txt} "
+    log.info(f"Scheduler started: {cfg.schedule_cron} + {flash_txt} "
           f"+ watchdog every 2min")
     yield
     # Sans cette trace, un SIGKILL après le délai de grâce était

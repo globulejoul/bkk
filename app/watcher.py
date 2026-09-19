@@ -149,12 +149,12 @@ def run_once(cfg: Config) -> dict[str, Any]:
 
         for trip in cfg.trips:
             if not trip.enabled:
-                log.warning(f"  ⏸ {trip.name}: désactivé, skip")
+                log.info(f"  ⏸ {trip.name}: désactivé, skip")
                 continue
             # Une fenêtre aller entièrement passée n'est plus réservable :
             # chaque combo partait quand même vers Duffel (422 + quota).
             if trip.outbound_window[1] < tomorrow:
-                log.warning(f"  🗓 {trip.name}: période échue, skip")
+                log.info(f"  🗓 {trip.name}: période échue, skip")
                 summary["expired"].append(trip.name)
                 continue
             trips_active += 1
@@ -174,7 +174,7 @@ def run_once(cfg: Config) -> dict[str, Any]:
         # Hotel checks
         for hotel in cfg.hotels:
             if not hotel.enabled:
-                log.warning(f"  ⏸ Hotel {hotel.name}: désactivé, skip")
+                log.info(f"  ⏸ Hotel {hotel.name}: désactivé, skip")
                 continue
             if not hotel.checkin or not hotel.checkout:
                 log.warning(f"  ⚠ Hotel {hotel.name}: dates manquantes, skip")
@@ -182,7 +182,7 @@ def run_once(cfg: Config) -> dict[str, Any]:
             # Un séjour dont l'arrivée est passée ne peut plus être tarifé :
             # Google renvoyait alors un prix pour d'autres dates.
             if hotel.checkin < today:
-                log.warning(f"  🗓 Hotel {hotel.name}: séjour échu, skip")
+                log.info(f"  🗓 Hotel {hotel.name}: séjour échu, skip")
                 summary["expired"].append(f"Hotel {hotel.name}")
                 continue
             try:
@@ -533,7 +533,7 @@ def process_results(cfg: Config, trip: Trip,
             db.log_alert(c, trip.name, "new_low", best_price_eur, payload)
         alert_count += 1
         tag = "flash" if flash else "run"
-        log.warning(f"  ⚠️  new_low alert sent ({best_price_eur:.0f}€, {tag})")
+        log.info(f"  🔔 new_low alert sent ({best_price_eur:.0f}€, {tag})")
     elif rise and rise_already_sent:
         log.info("  📈 hausse déjà notifiée il y a moins de 24 h, on se tait")
     elif rise:
