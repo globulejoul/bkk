@@ -96,6 +96,49 @@ async function api(url, options) {
   return r.json();
 }
 
+// ── Mot de passe admin ──────────────────────────────
+// Le tableau de bord est consultable librement ; seules les routes qui
+// écrivent la config ou déclenchent un run le demandent. Conservé en
+// sessionStorage : redemandé à chaque nouvel onglet, jamais persisté.
+const ADMIN_PWD_KEY = 'bkk-admin-pwd';
+
+function getAdminPwd() {
+  try { return sessionStorage.getItem(ADMIN_PWD_KEY) || ''; }
+  catch (e) { return ''; }
+}
+
+function setAdminPwd(pwd) {
+  try { sessionStorage.setItem(ADMIN_PWD_KEY, pwd); } catch (e) { /* mode privé */ }
+}
+
+function clearAdminPwd() {
+  try { sessionStorage.removeItem(ADMIN_PWD_KEY); } catch (e) { /* ignore */ }
+}
+
+function adminHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  const pwd = getAdminPwd();
+  if (pwd) h['X-Admin-Password'] = pwd;
+  return h;
+}
+
+/** Appel protégé : redemande le mot de passe une fois sur 401. */
+async function adminFetch(url, options) {
+  const opts = Object.assign({}, options);
+  opts.headers = adminHeaders(opts.headers);
+  let r = await fetch(url, opts);
+  if (r.status === 401) {
+    clearAdminPwd();
+    const pwd = window.prompt('Mot de passe administrateur');
+    if (!pwd) return r;
+    setAdminPwd(pwd);
+    opts.headers = adminHeaders(options && options.headers);
+    r = await fetch(url, opts);
+    if (r.status === 401) clearAdminPwd();
+  }
+  return r;
+}
+
 // ── Run-now button ──────────────────────────────────
 
 // Au-delà, on considère que le run n'a jamais démarré (config invalide,
@@ -171,7 +214,8 @@ $('#run-now').addEventListener('click', async () => {
   try {
     const runs = await api('/api/runs?limit=1').catch(() => []);
     previousRunId = runs.length ? runs[0].id : null;
-    const r = await fetch('/api/run-now', { method: 'POST' });
+    const r = await adminFetch('/api/run-now', { method: 'POST' });
+    if (r.status === 401) { stop('🔒 mot de passe requis'); return; }
     if (r.status === 409) {
       // Un run tourne déjà : sa ligne existe, on la suit telle quelle.
       btn.textContent = 'Check en cours...';
@@ -1268,7 +1312,11 @@ let _adminConfig = null;
 
 async function loadAdmin() {
   try {
-    _adminConfig = await api('/api/admin/config');
+    const ra = await adminFetch('/api/admin/config');
+    if (!ra.ok) throw new Error(ra.status === 401
+      ? 'Mot de passe administrateur requis'
+      : `HTTP ${ra.status}`);
+    _adminConfig = await ra.json();
     renderOrigins();
     renderDestinations();
     renderTravelers();
@@ -1610,7 +1658,7 @@ async function saveConfig() {
   btn.disabled = true;
   status.textContent = 'Sauvegarde...';
   try {
-    const r = await fetch('/api/admin/config', {
+    const r = await adminFetch('/api/admin/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(_adminConfig),

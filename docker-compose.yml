@@ -7,6 +7,9 @@ services:
     environment:
       DUFFEL_API_KEY: ${DUFFEL_API_KEY:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
+      # Protège PUT/GET /api/admin/config et POST /api/run-now.
+      # Vide = routes ouvertes (dev local uniquement).
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       TZ: Europe/Paris
     volumes:
       # create_host_path: false -> si config.yml manque, Docker echoue avec un message

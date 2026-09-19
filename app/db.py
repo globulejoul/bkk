@@ -116,6 +116,13 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX IF NOT EXISTS idx_checks_trip_date
             ON checks(trip_name, check_date, price_eur);
     """),
+    # Empreinte des paramètres de recherche : quand ils changent, le
+    # « plus bas » enregistré ne porte plus sur le même voyage et doit
+    # être réinitialisé. L'historique des relevés, lui, est conservé.
+    (6, """
+        ALTER TABLE state ADD COLUMN config_hash TEXT;
+        ALTER TABLE hotel_state ADD COLUMN config_hash TEXT;
+    """),
 ]
 
 
@@ -269,7 +276,7 @@ def get_state(c: sqlite3.Connection, trip: str) -> dict[str, Any] | None:
 _VALID_STATE_COLS = frozenset({
     "lowest_price_eur", "lowest_seen_date", "lowest_origin",
     "lowest_destination", "lowest_booking_url", "rolling_json",
-    "last_check_at", "flash_until",
+    "last_check_at", "flash_until", "config_hash",
 })
 
 
@@ -528,7 +535,7 @@ def get_hotel_state(c: sqlite3.Connection, hotel: str,
 _VALID_HOTEL_STATE_COLS = frozenset({
     "lowest_price_eur", "lowest_seen_date", "lowest_source",
     "rolling_json", "last_check_at", "last_error",
-    "consecutive_failures", "last_alert_at",
+    "consecutive_failures", "last_alert_at", "config_hash",
 })
 
 

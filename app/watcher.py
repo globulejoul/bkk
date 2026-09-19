@@ -1,6 +1,8 @@
 """Main check loop: queries sources, detects alerts, persists, notifies."""
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
@@ -56,58 +58,71 @@ def _calc_trend(prices_7d: list[tuple[str, float]]) -> dict[str, Any]:
             "recommendation": recommendation}
 
 
-def _calc_buy_score(price_eur: float, trip: Trip, cfg: Config,
-                    rates: dict[str, float],
+def _calc_buy_score(price_eur: float, trip: Trip,
                     pct: float | None,
-                    trend: dict[str, Any]) -> int:
-    """Retourne un score d'achat 0-100.
+                    trend: dict[str, Any],
+                    lowest_eur: float | None = None,
+                    today: date | None = None) -> int:
+    """Score d'achat 0-100 : faut-il réserver maintenant ?
 
-    Facteurs:
-    - Percentile (40%) : pct bas = score haut
-    - Tendance (25%)   : rising after low → achète, falling → attends
-    - Jour semaine (10%): mar/mer mieux
-    - Délai départ (25%): sweet spot 45-90 jours
+    Pondération revue le 19 septembre 2026. L'ancienne version donnait
+    25 points sur 100 à une hausse et 5 à une baisse, au motif qu'une
+    hausse signale un « rebond après un creux ». C'est faux quand le prix
+    monte alors qu'il est déjà haut. Elle accordait aussi 10 points au
+    jour de la semaine du RELEVÉ, ce qui ne dit rien du vol et repose sur
+    un mythe démonté (cf. HISTORIQUE.md).
+
+    Facteurs retenus, tous vérifiables :
+    - Percentile (45) : ce prix est-il bas au regard de son historique ?
+    - Écart au plus bas connu (20) : combien on paie au-dessus du record.
+    - Délai avant départ (25) : effet réel et documenté.
+    - Tendance (10) : modulateur, pas prime. Une hausse ne vaut des
+      points que si le prix est par ailleurs bas.
     """
-    score = 0
+    today = today or date.today()
+    score = 0.0
 
-    # 1) Percentile factor (40 pts max)
-    if pct is not None:
-        score += int(40 * (1 - pct / 100))
+    # 1) Percentile (45 pts) — le signal le plus informatif.
+    score += 45 * (1 - pct / 100) if pct is not None else 22.5
+
+    # 2) Écart au plus bas connu (20 pts). Au record : 20 ; 25 % au-dessus
+    #    ou plus : 0. Répond à « est-ce que je paie cher pour ce voyage ? »
+    if lowest_eur and lowest_eur > 0 and price_eur > 0:
+        ecart = price_eur / lowest_eur - 1
+        score += 20 * max(0.0, min(1.0, 1 - ecart / 0.25))
     else:
-        score += 20  # pas assez de données → neutre
-
-    # 2) Trend factor (25 pts max)
-    direction = trend.get("direction", "stable")
-    if direction == "falling":
-        score += 5       # tendance baisse → attendre
-    elif direction == "rising":
-        score += 25      # rebond → acheter maintenant
-    else:
-        score += 15      # stable → correct
-
-    # 3) Day of week factor (10 pts max)
-    dow = date.today().weekday()  # 0=lun, 1=mar, 2=mer, ...
-    if dow in (1, 2):  # mardi, mercredi
         score += 10
-    else:
-        score += 5
 
-    # 4) Time to departure factor (25 pts max)
+    # 3) Délai avant départ (25 pts) : trop tôt, l'offre n'est pas ouverte ;
+    #    trop tard, les tarifs montent.
     try:
         out_date = datetime.strptime(trip.outbound_window[0], "%Y-%m-%d").date()
-        days_to_dep = (out_date - date.today()).days
-        if 45 <= days_to_dep <= 90:
+        jours = (out_date - today).days
+        if 45 <= jours <= 90:
             score += 25
-        elif 30 <= days_to_dep < 45 or 90 < days_to_dep <= 120:
+        elif 30 <= jours < 45 or 90 < jours <= 120:
             score += 20
-        elif days_to_dep < 30:
-            score += 15
+        elif 15 <= jours < 30:
+            score += 14
+        elif jours < 15:
+            score += 8
         else:
-            score += 10
-    except Exception:
+            score += 12      # très en avance : peu d'information
+    except (ValueError, TypeError, IndexError):
         score += 12
 
-    return min(100, max(0, score))
+    # 4) Tendance (10 pts). Une baisse en cours invite à attendre ; une
+    #    hausse ne vaut sa prime que si le niveau reste bas (vrai rebond).
+    direction = trend.get("direction", "stable")
+    bas = pct is not None and pct <= 30
+    if direction == "falling":
+        score += 2
+    elif direction == "rising":
+        score += 10 if bas else 4
+    else:
+        score += 6
+
+    return min(100, max(0, round(score)))
 
 
 def run_once(cfg: Config) -> dict[str, Any]:
@@ -200,6 +215,29 @@ def run_once(cfg: Config) -> dict[str, Any]:
         raise
 
     return summary
+
+
+def trip_config_hash(cfg: Config, trip: Trip) -> str:
+    """Empreinte des paramètres qui définissent le voyage surveillé.
+
+    Ne contient que ce qui rend deux prix comparables : changer le nom
+    d'une période ou son seuil ne doit pas effacer la référence.
+    """
+    payload = json.dumps([
+        sorted(cfg.origins), sorted(cfg.destinations),
+        list(trip.outbound_window), list(trip.return_window),
+        trip.min_nights, trip.max_nights,
+        cfg.adults, len(cfg.children), cfg.max_fly_duration_hours,
+    ], sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def hotel_config_hash(cfg: Config, hotel: HotelWatch) -> str:
+    """Empreinte du séjour surveillé (dates et voyageurs)."""
+    payload = json.dumps([
+        hotel.checkin, hotel.checkout, cfg.adults, len(cfg.children),
+    ], sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def _previous_run_failed(run_id: int) -> bool:
@@ -343,6 +381,17 @@ def _check_trip(cfg: Config, trip: Trip,
 
         # 5) State update / alert detection
         state = db.get_state(c, trip.name) or {}
+        cfg_hash = trip_config_hash(cfg, trip)
+        # Changer les dates, les aéroports ou le nombre de voyageurs
+        # change le voyage surveillé : l'ancien « plus bas » devient une
+        # référence inatteignable qui bloquerait toute alerte. On remet
+        # la référence à zéro, mais la table checks garde tout
+        # l'historique des relevés.
+        if state and state.get("config_hash") not in (None, cfg_hash):
+            print(f"  ♻ {trip.name}: paramètres modifiés, "
+                  f"référence d'alerte réinitialisée "
+                  f"(historique des prix conservé)")
+            state = {}
         prev_low = state.get("lowest_price_eur")
         rolling = state.get("rolling") or []
         # Plusieurs runs par jour : on garde le minimum de la journée.
@@ -373,7 +422,8 @@ def _check_trip(cfg: Config, trip: Trip,
                         "delta_eur": best_price_eur - recent_low}
 
         # Persist state
-        update: dict[str, Any] = {"rolling": rolling, "last_check_at": now}
+        update: dict[str, Any] = {"rolling": rolling, "last_check_at": now,
+                                  "config_hash": cfg_hash}
         if new_low or prev_low is None:
             update.update({
                 "lowest_price_eur": best_price_eur,
@@ -404,7 +454,8 @@ def _check_trip(cfg: Config, trip: Trip,
           f"({trend['change_pct']:+.1f}%)")
 
     # 6c) Buy score
-    buy_score = _calc_buy_score(best_price_eur, trip, cfg, rates, pct, trend)
+    buy_score = _calc_buy_score(best_price_eur, trip, pct, trend,
+                                lowest_eur=prev_low or best_price_eur)
     print(f"  Score achat: {buy_score}/100")
 
     # Alerte percentile : prix dans le 10e percentile historique
@@ -769,6 +820,14 @@ def _check_hotel(cfg: Config, hotel: HotelWatch,
             })
 
         state = db.get_hotel_state(c, hotel.name, hotel.name) or {}
+        h_hash = hotel_config_hash(cfg, hotel)
+        # Changer les dates du séjour change le produit suivi : même
+        # raisonnement que pour les vols, on repart d'une référence
+        # neuve sans toucher à l'historique des relevés.
+        if state and state.get("config_hash") not in (None, h_hash):
+            print(f"  ♻ Hotel {hotel.name}: dates modifiées, "
+                  f"référence d'alerte réinitialisée")
+            state = {}
         prev_low = state.get("lowest_price_eur")
         last_alert_at = state.get("last_alert_at")
 
@@ -793,6 +852,7 @@ def _check_hotel(cfg: Config, hotel: HotelWatch,
             "last_check_at": now,
             "last_error": None,
             "consecutive_failures": 0,
+            "config_hash": h_hash,
         }
         if new_low or prev_low is None:
             update.update({

@@ -169,6 +169,78 @@ def test_alert_cooldown() -> None:
                                  "2026-09-19T12:00:00"), True)
 
 
+
+# ── Score d'achat ────────────────────────────────────────────────
+
+def _trip(depart: str = '2027-02-11'):
+    from app.config import Trip
+    return Trip(name='T', outbound_window=(depart, depart),
+                return_window=('2027-03-01', '2027-03-01'))
+
+
+def test_buy_score_hausse_sur_prix_haut_ne_paie_pas() -> None:
+    from app.watcher import _calc_buy_score
+    from datetime import date as _date
+    jour = _date(2027, 1, 1)  # ~41 jours avant le départ
+    trip = _trip()
+    haut = _calc_buy_score(2000.0, trip, 90.0, {'direction': 'rising'},
+                           lowest_eur=1000.0, today=jour)
+    bas = _calc_buy_score(1000.0, trip, 5.0, {'direction': 'rising'},
+                          lowest_eur=1000.0, today=jour)
+    assert bas > haut + 40, f'bas={bas} haut={haut}'
+    # L'ancienne pondération donnait 25/100 à toute hausse : un prix au
+    # 90e percentile ne doit pas être recommandé à l'achat.
+    assert haut < 40, haut
+
+
+def test_buy_score_baisse_invite_a_attendre() -> None:
+    from app.watcher import _calc_buy_score
+    from datetime import date as _date
+    jour, trip = _date(2027, 1, 1), _trip()
+    baisse = _calc_buy_score(1000.0, trip, 20.0, {'direction': 'falling'},
+                             lowest_eur=1000.0, today=jour)
+    stable = _calc_buy_score(1000.0, trip, 20.0, {'direction': 'stable'},
+                             lowest_eur=1000.0, today=jour)
+    assert baisse < stable, f'baisse={baisse} stable={stable}'
+
+
+def test_buy_score_borne_et_independant_du_jour_de_run() -> None:
+    from app.watcher import _calc_buy_score
+    from datetime import date as _date
+    trip = _trip()
+    # Même prix, même délai avant départ, deux jours de semaine
+    # différents : le score ne doit plus bouger (facteur supprimé).
+    mardi = _calc_buy_score(1000.0, _trip('2027-02-15'), 10.0,
+                            {'direction': 'stable'}, lowest_eur=1000.0,
+                            today=_date(2027, 1, 5))
+    jeudi = _calc_buy_score(1000.0, _trip('2027-02-17'), 10.0,
+                            {'direction': 'stable'}, lowest_eur=1000.0,
+                            today=_date(2027, 1, 7))
+    check('jour de run sans effet', mardi, jeudi)
+    for s in (mardi, jeudi):
+        assert 0 <= s <= 100
+
+
+def test_config_hash_reagit_aux_bons_champs() -> None:
+    from app.watcher import trip_config_hash
+    from app.config import Config, Trip
+    cfg = Config(origins=['CDG'], destinations=['BKK'], adults=2)
+    t1 = Trip(name='A', outbound_window=('2027-02-11', '2027-02-13'),
+              return_window=('2027-03-01', '2027-03-02'), price_threshold=800)
+    base = trip_config_hash(cfg, t1)
+    # Le seuil et le nom ne changent pas le voyage surveillé.
+    t2 = Trip(name='B', outbound_window=('2027-02-11', '2027-02-13'),
+              return_window=('2027-03-01', '2027-03-02'), price_threshold=500)
+    check('seuil et nom indifférents', trip_config_hash(cfg, t2), base)
+    # Les dates, si.
+    t3 = Trip(name='A', outbound_window=('2027-02-12', '2027-02-13'),
+              return_window=('2027-03-01', '2027-03-02'))
+    assert trip_config_hash(cfg, t3) != base
+    # Le nombre de voyageurs aussi.
+    cfg2 = Config(origins=['CDG'], destinations=['BKK'], adults=3)
+    assert trip_config_hash(cfg2, t1) != base
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

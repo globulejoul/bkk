@@ -13,6 +13,7 @@ Routes:
 """
 from __future__ import annotations
 
+import hmac
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -23,7 +24,7 @@ from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -47,6 +48,25 @@ MISFIRE_GRACE = 3600
 # Borne des paramètres `days` : days=10**10 levait OverflowError (500).
 # Reste très au-dessus du `days=9999` que le dashboard envoie pour « tout ».
 DAYS_MAX = 36500
+
+# Le tableau de bord reste consultable sans mot de passe ; seules les
+# routes qui écrivent la configuration ou déclenchent un run (donc de la
+# consommation d'API) sont protégées. Le nom de domaine est public : tout
+# certificat émis par Caddy est publié dans les journaux Certificate
+# Transparency, donc « URL non devinable » n'est pas une protection.
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+
+
+def require_admin(
+    x_admin_password: str | None = Header(default=None),
+) -> None:
+    """Refuse la requête si le mot de passe admin ne correspond pas."""
+    if not ADMIN_PASSWORD:
+        return  # non configuré (dev local) : pas de blocage
+    if not x_admin_password or not hmac.compare_digest(
+            x_admin_password, ADMIN_PASSWORD):
+        raise HTTPException(status_code=401,
+                            detail="Mot de passe administrateur requis")
 
 
 def _run_safe() -> None:
@@ -197,15 +217,24 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_run_safe, trigger, id="watcher",
                       max_instances=1, coalesce=True,
                       misfire_grace_time=MISFIRE_GRACE)
-    # Flash mode: vérification toutes les 5 minutes
-    scheduler.add_job(_flash_check, IntervalTrigger(minutes=5),
-                      id="flash_check", max_instances=1, coalesce=True)
+    # Flash mode : surveillance rapprochée pendant 48 h après un seuil
+    # atteint. Il n'interroge que Duffel ; sans clé il prendrait le verrou
+    # toutes les 5 minutes pour ne rien faire, en bloquant au passage un
+    # run planifié ou un check manuel. On ne le programme donc que si la
+    # clé est présente.
+    flash_on = bool(os.environ.get("DUFFEL_API_KEY")
+                    or os.environ.get("DUFFEL"))
+    if flash_on:
+        scheduler.add_job(_flash_check, IntervalTrigger(minutes=5),
+                          id="flash_check", max_instances=1, coalesce=True)
     scheduler.add_job(_watchdog, IntervalTrigger(minutes=2),
                       id="watchdog", max_instances=1, coalesce=True)
     scheduler.add_listener(_on_job_skipped,
                            EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES)
     scheduler.start()
-    print(f"Scheduler started: {cfg.schedule_cron} + flash every 5min + watchdog every 2min")
+    flash_txt = "flash 5min" if flash_on else "flash OFF (pas de clé Duffel)"
+    print(f"Scheduler started: {cfg.schedule_cron} + {flash_txt} "
+          f"+ watchdog every 2min")
     yield
     if scheduler:
         scheduler.shutdown(wait=False)
@@ -324,10 +353,6 @@ def get_trip_stats(name: str):
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
 
-    # _calc_buy_score ne lit jamais les taux : les deux appels frankfurter
-    # qui étaient faits ici coûtaient 2 requêtes HTTP par carte, sans effet.
-    no_rates: dict[str, float] = {}
-
     with db.conn() as c:
         trend_data = db.price_trend(c, name, days=7)
         trend = watcher._calc_trend(trend_data)
@@ -341,7 +366,8 @@ def get_trip_stats(name: str):
             pct = db.percentile_rank(c, name, current_price)
             pct_cache[current_price] = pct
             buy_score = watcher._calc_buy_score(
-                current_price, trip, cfg, no_rates, pct, trend,
+                current_price, trip, pct, trend,
+                lowest_eur=state.get("lowest_price_eur"),
             )
 
     # Buy score history: compute score for each historical price point
@@ -357,8 +383,16 @@ def get_trip_stats(name: str):
                 # l'historique par prix distinct au lieu d'un par point.
                 if price not in pct_cache:
                     pct_cache[price] = db.percentile_rank(c, name, price)
+                # Score recalculé AU JOUR du relevé : sinon le délai
+                # avant départ d'aujourd'hui était appliqué à des points
+                # vieux de plusieurs semaines, aplatissant la courbe.
+                try:
+                    jour = datetime.strptime(sub[-1][0], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    jour = None
                 score_i = watcher._calc_buy_score(
-                    price, trip, cfg, no_rates, pct_cache[price], t_trend)
+                    price, trip, pct_cache[price], t_trend,
+                    lowest_eur=min(p for _, p in sub), today=jour)
                 score_history.append({
                     "date": sub[-1][0], "score": score_i, "price": price})
 
@@ -381,7 +415,7 @@ def get_runs(limit: int = Query(10, ge=1, le=200)):
         return db.last_runs(c, limit)
 
 
-@app.post("/api/run-now")
+@app.post("/api/run-now", dependencies=[Depends(require_admin)])
 async def run_now():
     global _run_started_at
     if _run_lock.locked():
@@ -422,7 +456,7 @@ def config_summary():
 # ── Admin API ────────────────────────────────────────────────
 
 
-@app.get("/api/admin/config")
+@app.get("/api/admin/config", dependencies=[Depends(require_admin)])
 def get_admin_config():
     """Return full editable config."""
     data = config.load_raw()
@@ -445,7 +479,7 @@ class ConfigUpdate(BaseModel):
     hotels: list[dict] | None = Field(default=None, max_length=20)
 
 
-@app.put("/api/admin/config")
+@app.put("/api/admin/config", dependencies=[Depends(require_admin)])
 def update_admin_config(body: ConfigUpdate):
     """Update config.yml with new values."""
     # Un cron invalide faisait échouer from_crontab APRÈS remove_job :
