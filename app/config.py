@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,20 @@ class Config:
     vpn_proxy_url: str | None = None
 
 
+def _as_date_str(value: Any) -> str:
+    """Normalise une date en 'YYYY-MM-DD'.
+
+    PyYAML résout `checkin: 2027-02-13` (sans guillemets) en
+    `datetime.date`, ce qui faisait ensuite échouer strptime et rendait
+    l'hôtel invisible. On accepte les deux écritures.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()[:10]
+    return str(value).strip()[:10]
+
+
 def load() -> Config:
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(f"Missing config: {CONFIG_PATH}")
@@ -94,9 +109,9 @@ def load() -> Config:
         hotels=[
             HotelWatch(
                 name=h["name"],
-                entity_id=h["entity_id"],
-                checkin=h.get("checkin", ""),
-                checkout=h.get("checkout", ""),
+                entity_id=str(h.get("entity_id") or ""),
+                checkin=_as_date_str(h.get("checkin")),
+                checkout=_as_date_str(h.get("checkout")),
                 price_threshold=h.get("price_threshold"),
                 enabled=h.get("enabled", True),
             )
@@ -126,6 +141,18 @@ def save_raw(data: dict) -> None:
             raise ValueError(f"Trip {t['name']}: outbound_window must be [start, end]")
         if not t.get("return_window") or len(t["return_window"]) != 2:
             raise ValueError(f"Trip {t['name']}: return_window must be [start, end]")
+
+    for h in data.get("hotels", []):
+        if not h.get("name"):
+            raise ValueError("Each hotel must have a name")
+        # Réécrit les dates en chaînes : évite que yaml.dump les
+        # ressorte sans guillemets et qu'elles reviennent en objets date.
+        for key in ("checkin", "checkout"):
+            h[key] = _as_date_str(h.get(key))
+        ci, co = h.get("checkin"), h.get("checkout")
+        if ci and co and ci >= co:
+            raise ValueError(
+                f"Hotel {h['name']}: check-in doit précéder le check-out")
 
     CONFIG_PATH.write_text(yaml.dump(data, default_flow_style=False,
                                       allow_unicode=True, sort_keys=False))

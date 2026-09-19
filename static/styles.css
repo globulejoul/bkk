@@ -1,6 +1,6 @@
 :root {
   /* Bangkok palette */
-  --bg: #e7e9f1;
+  --bg: #e5e6ef;
   --bg-elev: #dfe1e9;
   --bg-card: #ffffff;
   --border: #cfcdcb;
@@ -185,6 +185,15 @@ h2 {
 }
 .trip-card .price-main.good { color: var(--green); }
 .trip-card .price-main.bad { color: var(--rose); }
+/* État de collecte d'un hôtel (panne, relevé périmé, surveillance en pause) */
+.hotel-status {
+  margin-top: 0.5rem;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.hotel-status.bad { color: var(--rose); }
+.hotel-status.dim { color: var(--text-dim); }
 .trip-card .price-main.none { color: var(--text-faint); font-size: 1.5rem; }
 .trip-card .price-main .currency {
   font-size: 1.25rem;

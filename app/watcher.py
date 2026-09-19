@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from app import db, fx, hotels, notify, sources
-from app.config import Config
+from app.config import Config, HotelWatch
 
 
 # ── Trend & buy-score helpers ───────────────────────────────────
@@ -578,37 +578,63 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
     return best_oj
 
 
-def _check_hotel(cfg: Config, hotel, rates: dict[str, float]) -> None:
-    """Check hotel prices for specific dates."""
+def _check_hotel(cfg: Config, hotel: HotelWatch,
+                 rates: dict[str, float]) -> None:
+    """Relève les prix d'un hôtel et déclenche les alertes.
+
+    Un échec identifiable (blocage Google, hôtel introuvable, timeout)
+    est tracé dans `hotel_state` au lieu d'être confondu avec « aucun
+    prix trouvé » : sans cela la surveillance mourait en silence.
+    """
     today = date.today().isoformat()
     now = datetime.now().isoformat()
 
     checkin = hotel.checkin
     checkout = hotel.checkout
-    checkin_dt = datetime.strptime(checkin, "%Y-%m-%d")
-    checkout_dt = datetime.strptime(checkout, "%Y-%m-%d")
+    try:
+        checkin_dt = datetime.strptime(checkin, "%Y-%m-%d")
+        checkout_dt = datetime.strptime(checkout, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        _record_hotel_failure(cfg, hotel, now,
+                              f"dates invalides ({checkin} → {checkout})")
+        return
     nights = (checkout_dt - checkin_dt).days
 
     print(f"\n→ Hotel {hotel.name}: {checkin} → {checkout} ({nights} nuits)")
 
-    result = hotels.search_hotel(
-        hotel_name=hotel.name,
-        checkin=checkin,
-        checkout=checkout,
-        adults=cfg.adults,
-        children=cfg.children if cfg.children else None,
-        currency=cfg.currency,
-    )
+    # Conversion injectée : hotels.py reste indépendant de fx.
+    def _to_eur_local(amount: float, currency: str) -> float | None:
+        return fx.to_eur(amount, currency, rates)
 
-    if not result or not result.prices:
-        print(f"  ⚠ Aucun prix trouvé pour {hotel.name}")
+    try:
+        result = hotels.search_hotel(
+            hotel_name=hotel.name,
+            checkin=checkin,
+            checkout=checkout,
+            adults=cfg.adults,
+            children=cfg.children if cfg.children else None,
+            currency=cfg.currency,
+            to_eur=_to_eur_local,
+        )
+    except hotels.HotelScrapeError as e:
+        print(f"  ❌ Hotel {hotel.name}: {e}")
+        _record_hotel_failure(cfg, hotel, now, str(e))
         return
 
-    # Persist tous les prix par provider
+    if not result or not result.prices:
+        print(f"  ⚠ Aucun prix exploitable pour {hotel.name}")
+        _record_hotel_failure(cfg, hotel, now, "aucun prix exploitable")
+        return
+
+    best_eur = result.best_price_eur
+    if best_eur is None:
+        print(f"  ⚠ {hotel.name}: prix non convertibles en EUR")
+        _record_hotel_failure(cfg, hotel, now, "prix non convertibles en EUR")
+        return
+
+    # Persistance de tous les prix providers
     with db.conn() as c:
         for hp in result.prices:
-            price_eur = hp.price if hp.currency == "EUR" else fx.to_eur(
-                hp.price, hp.currency, rates)
             db.insert_hotel_check(c, {
                 "check_date": today,
                 "trip_name": hotel.name,
@@ -616,7 +642,7 @@ def _check_hotel(cfg: Config, hotel, rates: dict[str, float]) -> None:
                 "source": hp.source,
                 "price_local": hp.price,
                 "currency": hp.currency,
-                "price_eur": price_eur,
+                "price_eur": hp.price_eur,
                 "checkin_date": checkin,
                 "checkout_date": checkout,
                 "nights": nights,
@@ -624,18 +650,9 @@ def _check_hotel(cfg: Config, hotel, rates: dict[str, float]) -> None:
                 "captured_at": now,
             })
 
-        # State update
-        best_eur = None
-        if result.best_price is not None:
-            best_eur = (result.best_price if result.best_currency == "EUR"
-                        else fx.to_eur(result.best_price, result.best_currency,
-                                       rates))
-
-        if best_eur is None:
-            return
-
         state = db.get_hotel_state(c, hotel.name, hotel.name) or {}
         prev_low = state.get("lowest_price_eur")
+        last_alert_at = state.get("last_alert_at")
 
         rolling = state.get("rolling") or []
         rolling = [x for x in rolling if x[0] != today]
@@ -648,37 +665,87 @@ def _check_hotel(cfg: Config, hotel, rates: dict[str, float]) -> None:
         hit_threshold = (hotel.price_threshold is not None
                          and best_eur <= hotel.price_threshold)
 
-        update = {"rolling": rolling, "last_check_at": now}
+        # Un seuil atteint reste atteint : sans ce délai de garde, une
+        # notification partait à chaque run tant que le prix restait bas.
+        should_alert = new_low or (
+            hit_threshold and _alert_cooldown_passed(last_alert_at, now))
+
+        update: dict[str, Any] = {
+            "rolling": rolling,
+            "last_check_at": now,
+            "last_error": None,
+            "consecutive_failures": 0,
+        }
         if new_low or prev_low is None:
             update.update({
                 "lowest_price_eur": best_eur,
                 "lowest_seen_date": today,
                 "lowest_source": result.best_source,
             })
+        if should_alert:
+            update["last_alert_at"] = now
         db.upsert_hotel_state(c, hotel.name, hotel.name, **update)
 
-    # Alertes
-    if new_low or hit_threshold:
-        payload = {
-            "kind": "hotel_low",
-            "hotel": hotel.name,
-            "price": best_eur,
-            "previous_low": prev_low,
-            "hit_threshold": hit_threshold,
-            "source": result.best_source,
-            "checkin": checkin,
-            "checkout": checkout,
-            "nights": nights,
-            "providers": [
-                {"source": p.source, "price": p.price, "currency": p.currency}
-                for p in result.prices
-            ],
-        }
-        notify.send_hotel_ntfy(cfg, payload)
-        with db.conn() as c:
-            db.log_alert(c, hotel.name, "hotel_low", best_eur, payload)
-        tag = "🎯 SEUIL" if hit_threshold else "📉 BAS"
-        print(f"  🏨 {tag} Hotel alert: {best_eur:.0f}€ ({result.best_source})")
+    if not should_alert:
+        print(f"  🏨 {best_eur:.0f}€ ({result.best_source}) — pas d'alerte")
+        return
+
+    payload = {
+        "kind": "hotel_low",
+        "hotel": hotel.name,
+        "price": best_eur,
+        "previous_low": prev_low,
+        "hit_threshold": hit_threshold,
+        "source": result.best_source,
+        "checkin": checkin,
+        "checkout": checkout,
+        "nights": nights,
+        "providers": [
+            {"source": p.source, "price": p.price, "currency": p.currency,
+             "price_eur": p.price_eur}
+            for p in result.prices
+        ],
+    }
+    delivered = notify.send_hotel_ntfy(cfg, payload)
+    with db.conn() as c:
+        db.log_alert(c, hotel.name, "hotel_low", best_eur, payload)
+    tag = "🎯 SEUIL" if hit_threshold else "📉 BAS"
+    status = "" if delivered else " (ntfy KO)"
+    print(f"  🏨 {tag} Hotel alert: {best_eur:.0f}€ "
+          f"({result.best_source}){status}")
+
+
+def _alert_cooldown_passed(last_alert_at: str | None, now: str,
+                           hours: int = 24) -> bool:
+    """Vrai si la dernière alerte hôtel date de plus de *hours*."""
+    if not last_alert_at:
+        return True
+    try:
+        previous = datetime.fromisoformat(last_alert_at)
+        current = datetime.fromisoformat(now)
+    except (ValueError, TypeError):
+        return True
+    return (current - previous) >= timedelta(hours=hours)
+
+
+def _record_hotel_failure(cfg: Config, hotel: HotelWatch, now: str,
+                          reason: str) -> None:
+    """Trace l'échec dans l'état et prévient après 3 échecs d'affilée."""
+    with db.conn() as c:
+        state = db.get_hotel_state(c, hotel.name, hotel.name) or {}
+        failures = (state.get("consecutive_failures") or 0) + 1
+        db.upsert_hotel_state(
+            c, hotel.name, hotel.name,
+            last_check_at=now,
+            last_error=reason[:500],
+            consecutive_failures=failures,
+        )
+    if failures == 3:
+        notify.send_ops_ntfy(
+            cfg,
+            f"🏨 Suivi hôtel en panne — {hotel.name}",
+            f"3 échecs consécutifs.\nDernière raison : {reason}",
+        )
 
 
 def _build_cross_checks(cfg: Config, best: sources.FlightResult,

@@ -1024,11 +1024,35 @@ async function loadHotels() {
   }
 }
 
+// Un relevé plus vieux que ça signale une collecte en panne.
+const HOTEL_STALE_HOURS = 18;
+
+function hotelStatus(h) {
+  if (h.enabled === false) return { cls: 'dim', text: 'en pause' };
+  if (h.consecutive_failures > 0) {
+    const n = h.consecutive_failures;
+    return {
+      cls: 'bad',
+      text: `collecte en échec (${n}×)` + (h.last_error ? ' — ' + h.last_error : ''),
+    };
+  }
+  const stamp = h.last_captured_at || h.last_check_at;
+  if (stamp) {
+    const ageH = (Date.now() - new Date(stamp).getTime()) / 3600000;
+    if (ageH > HOTEL_STALE_HOURS) {
+      return { cls: 'bad', text: `dernier relevé il y a ${Math.round(ageH)} h` };
+    }
+  }
+  return null;
+}
+
 function buildHotelCard(h) {
   const card = document.createElement('div');
   card.className = 'trip-card' + (h.current_best === null ? ' no-data' : '');
   card.addEventListener('click', () => {
-    $('#hotel-select').value = `${h.hotel_name}|${h.trip_name}`;
+    // Les <option> ont pour value h.hotel_name : toute autre valeur
+    // laissait le select vide et le détail ne se chargeait jamais.
+    $('#hotel-select').value = h.hotel_name;
     loadHotelDetail();
   });
 
@@ -1052,7 +1076,16 @@ function buildHotelCard(h) {
       <span><span class="stat-label">moy 30j</span> ${h.avg_30d != null ? Math.round(h.avg_30d) + '€' : '—'}</span>
     </div>
     ${h.threshold ? `<div class="threshold"><span class="dim">Seuil</span><span class="target">≤ ${h.threshold}€</span></div>` : ''}
+    <div class="hotel-status"></div>
   `;
+  const st = hotelStatus(h);
+  const statusEl = card.querySelector('.hotel-status');
+  if (st) {
+    statusEl.textContent = st.text;
+    statusEl.classList.add(st.cls);
+  } else {
+    statusEl.remove();
+  }
   return card;
 }
 

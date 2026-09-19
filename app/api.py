@@ -418,32 +418,46 @@ async def update_admin_config(body: ConfigUpdate):
 
 # ── Hotels API ───────────────────────────────────────────────
 
+def _nights_between(checkin: str, checkout: str) -> int | None:
+    """Nombre de nuits, ou None si les dates sont absentes ou invalides."""
+    if not checkin or not checkout:
+        return None
+    try:
+        ci = datetime.strptime(str(checkin)[:10], "%Y-%m-%d")
+        co = datetime.strptime(str(checkout)[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+    nights = (co - ci).days
+    return nights if nights > 0 else None
+
+
 @app.get("/api/hotels")
 async def get_hotels():
     cfg = config.load()
     with db.conn() as c:
         summary = db.hotel_summary(c)
     by_name = {h.name: h for h in cfg.hotels}
+    # Un hôtel retiré de la config laissait une carte fantôme définitive.
+    summary = [s for s in summary if s["hotel_name"] in by_name]
     for s in summary:
-        h = by_name.get(s["hotel_name"])
-        if h:
-            s["checkin"] = h.checkin
-            s["checkout"] = h.checkout
-            s["threshold"] = h.price_threshold
-            s["enabled"] = h.enabled
-    # Add hotels from config that have no data yet
+        h = by_name[s["hotel_name"]]
+        s["checkin"] = h.checkin
+        s["checkout"] = h.checkout
+        s["threshold"] = h.price_threshold
+        s["enabled"] = h.enabled
+        s["nights"] = _nights_between(h.checkin, h.checkout)
+    # Hôtels configurés mais sans aucune donnée
     have = {s["hotel_name"] for s in summary}
     for h in cfg.hotels:
         if h.name not in have:
-            checkin_dt = datetime.strptime(h.checkin, "%Y-%m-%d") if h.checkin else None
-            checkout_dt = datetime.strptime(h.checkout, "%Y-%m-%d") if h.checkout else None
-            nights = (checkout_dt - checkin_dt).days if checkin_dt and checkout_dt else None
             summary.append({
                 "hotel_name": h.name, "trip_name": h.name,
                 "current_best": None, "lowest_price_eur": None,
                 "avg_30d": None, "last_check_at": None,
+                "last_captured_at": None, "last_error": None,
+                "consecutive_failures": 0,
                 "checkin": h.checkin, "checkout": h.checkout,
-                "nights": nights,
+                "nights": _nights_between(h.checkin, h.checkout),
                 "threshold": h.price_threshold,
                 "enabled": h.enabled,
             })

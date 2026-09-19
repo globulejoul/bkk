@@ -203,10 +203,35 @@ def _body_rise(a: dict) -> str:
     )
 
 
-def send_hotel_ntfy(cfg: Config, alert: dict) -> None:
-    """Notification ntfy pour les alertes hôtel."""
+def send_ops_ntfy(cfg: Config, title: str, body: str) -> bool:
+    """Notification technique (panne de collecte), distincte des prix."""
     if not cfg.ntfy.topic:
-        return
+        return False
+    server = cfg.ntfy.server.rstrip("/")
+    url = f"{server}/{cfg.ntfy.topic}"
+    headers = {
+        "Title": title.encode("utf-8"),
+        "Tags": "warning",
+        "Priority": "default",
+    }
+    token = os.environ.get("NTFY_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        r = requests.post(url, data=body.encode("utf-8"),
+                          headers=headers, timeout=15)
+        if not r.ok:
+            print(f"  ntfy ops HTTP {r.status_code}: {r.text[:200]}")
+        return r.ok
+    except Exception as e:
+        print(f"  ntfy ops error: {e}")
+        return False
+
+
+def send_hotel_ntfy(cfg: Config, alert: dict) -> bool:
+    """Notification ntfy pour les alertes hôtel. Renvoie True si délivrée."""
+    if not cfg.ntfy.topic:
+        return False
     server = cfg.ntfy.server.rstrip("/")
     url = f"{server}/{cfg.ntfy.topic}"
     token = os.environ.get("NTFY_TOKEN")
@@ -227,8 +252,15 @@ def send_hotel_ntfy(cfg: Config, alert: dict) -> None:
     if providers:
         body_lines.append("")
         body_lines.append("**Comparaison providers:**")
-        for p in sorted(providers, key=lambda x: x["price"]):
-            body_lines.append(f"• {p['source']}: {p['price']:.0f} {p['currency']}")
+        # Trier sur l'équivalent EUR : comparer 4 000 THB et 110 EUR
+        # par ordre numérique donnerait un classement absurde.
+        for p in sorted(providers,
+                        key=lambda x: x.get("price_eur") or x["price"]):
+            line = f"• {p['source']}: {p['price']:.0f} {p['currency']}"
+            eur = p.get("price_eur")
+            if eur is not None and p["currency"] != "EUR":
+                line += f" ≈ {eur:.0f}€"
+            body_lines.append(line)
 
     headers = {
         "Title": title.encode("utf-8"),
@@ -240,7 +272,11 @@ def send_hotel_ntfy(cfg: Config, alert: dict) -> None:
         headers["Authorization"] = f"Bearer {token}"
 
     try:
-        requests.post(url, data="\n".join(body_lines).encode("utf-8"),
-                      headers=headers, timeout=15)
+        r = requests.post(url, data="\n".join(body_lines).encode("utf-8"),
+                          headers=headers, timeout=15)
+        if not r.ok:
+            print(f"  ntfy hotel HTTP {r.status_code}: {r.text[:200]}")
+        return r.ok
     except Exception as e:
         print(f"  ntfy hotel error: {e}")
+        return False

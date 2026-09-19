@@ -104,6 +104,11 @@ MIGRATIONS: list[tuple[int, str]] = [
             PRIMARY KEY (hotel_name, trip_name)
         );
     """),
+    (4, """
+        ALTER TABLE hotel_state ADD COLUMN last_error TEXT;
+        ALTER TABLE hotel_state ADD COLUMN consecutive_failures INTEGER DEFAULT 0;
+        ALTER TABLE hotel_state ADD COLUMN last_alert_at TEXT;
+    """),
 ]
 
 
@@ -476,10 +481,20 @@ def get_hotel_state(c: sqlite3.Connection, hotel: str,
     return d
 
 
+_VALID_HOTEL_STATE_COLS = frozenset({
+    "lowest_price_eur", "lowest_seen_date", "lowest_source",
+    "rolling_json", "last_check_at", "last_error",
+    "consecutive_failures", "last_alert_at",
+})
+
+
 def upsert_hotel_state(c: sqlite3.Connection, hotel: str,
                        trip: str, **kwargs) -> None:
     if "rolling" in kwargs:
         kwargs["rolling_json"] = json.dumps(kwargs.pop("rolling"))
+    bad = set(kwargs.keys()) - _VALID_HOTEL_STATE_COLS
+    if bad:
+        raise ValueError(f"Invalid hotel_state columns: {bad}")
     current = c.execute(
         "SELECT 1 FROM hotel_state WHERE hotel_name=? AND trip_name=?",
         (hotel, trip),
@@ -505,16 +520,35 @@ def hotel_summary(c: sqlite3.Connection) -> list[dict]:
     rows = c.execute("""
         SELECT hs.hotel_name, hs.trip_name,
                hs.lowest_price_eur, hs.lowest_seen_date, hs.lowest_source,
-               hs.last_check_at,
+               hs.last_check_at, hs.last_error, hs.consecutive_failures,
+               -- Prix du DERNIER relevé, pas le minimum de la journée :
+               -- sinon un prix vu à 6h et disparu reste affiché jusqu'à
+               -- minuit alors que le graphique montre autre chose.
                (SELECT MIN(price_eur) FROM hotel_checks
-                WHERE hotel_name = hs.hotel_name AND trip_name = hs.trip_name
-                AND check_date = (SELECT MAX(check_date) FROM hotel_checks
-                                  WHERE hotel_name = hs.hotel_name
-                                  AND trip_name = hs.trip_name)
+                 WHERE hotel_name = hs.hotel_name
+                   AND trip_name = hs.trip_name
+                   AND price_eur IS NOT NULL
+                   AND captured_at = (SELECT MAX(captured_at)
+                                        FROM hotel_checks
+                                       WHERE hotel_name = hs.hotel_name
+                                         AND trip_name = hs.trip_name)
                ) AS current_best,
-               (SELECT AVG(price_eur) FROM hotel_checks
-                WHERE hotel_name = hs.hotel_name AND trip_name = hs.trip_name
-                AND check_date >= date('now', '-30 days')
+               (SELECT MAX(captured_at) FROM hotel_checks
+                 WHERE hotel_name = hs.hotel_name
+                   AND trip_name = hs.trip_name
+               ) AS last_captured_at,
+               -- Moyenne des MEILLEURS prix par relevé, pour être
+               -- homogène avec « bas » et « prix actuel ».
+               (SELECT AVG(r.m) FROM (
+                    SELECT hotel_name, trip_name, captured_at,
+                           MIN(price_eur) AS m
+                      FROM hotel_checks
+                     WHERE price_eur IS NOT NULL
+                       AND check_date >= date('now', '-30 days')
+                     GROUP BY hotel_name, trip_name, captured_at
+                 ) r
+                 WHERE r.hotel_name = hs.hotel_name
+                   AND r.trip_name = hs.trip_name
                ) AS avg_30d
         FROM hotel_state hs
         ORDER BY hs.trip_name
@@ -540,15 +574,24 @@ def hotel_history(c: sqlite3.Connection, hotel: str, trip: str,
 def hotel_breakdown(c: sqlite3.Connection, hotel: str,
                     trip: str) -> list[dict]:
     """Best price per provider for a hotel/trip."""
+    # Deux agrégats (MIN + MAX) dans un même SELECT rendent les colonnes
+    # nues arbitraires en SQLite : on isole le minimum puis on rejoint.
     rows = c.execute("""
-        SELECT source, MIN(price_eur) AS best_eur,
-               price_local, currency, booking_url,
-               MAX(check_date) AS last_seen
-        FROM hotel_checks
-        WHERE hotel_name = ? AND trip_name = ?
-          AND price_eur IS NOT NULL
-          AND check_date >= date('now', '-30 days')
-        GROUP BY source
-        ORDER BY best_eur ASC
-    """, (hotel, trip)).fetchall()
+        SELECT b.source, b.best_eur, b.last_seen,
+               h.price_local, h.currency, h.booking_url
+        FROM (
+            SELECT source, MIN(price_eur) AS best_eur,
+                   MAX(check_date) AS last_seen
+            FROM hotel_checks
+            WHERE hotel_name = :hotel AND trip_name = :trip
+              AND price_eur IS NOT NULL
+              AND check_date >= date('now', '-30 days')
+            GROUP BY source
+        ) b
+        JOIN hotel_checks h
+          ON h.hotel_name = :hotel AND h.trip_name = :trip
+         AND h.source = b.source AND h.price_eur = b.best_eur
+        GROUP BY b.source
+        ORDER BY b.best_eur ASC
+    """, {"hotel": hotel, "trip": trip}).fetchall()
     return [dict(r) for r in rows]
