@@ -16,7 +16,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 
 class HotelScrapeError(RuntimeError):
@@ -51,7 +51,6 @@ class HotelResult:
     best_price_eur: float | None = None
     scraped_at: str = ""
     entry_url: str = ""       # URL réellement utilisée (traçabilité)
-    matched_text: str = ""    # libellé du lien cliqué, si repli recherche
     dates_confirmed: bool = False  # un lien provider porte bien les dates
     stay_total_eur: float | None = None  # « Prix total de X € », référence
     providers_seen: list[str] = field(default_factory=list)
@@ -200,14 +199,37 @@ def build_ts(checkin: str, checkout: str, adults: int = 1,
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
-def _search_url(hotel_name: str, checkin: str, checkout: str,
-                adults: int, currency: str) -> str:
+def _base_url(hotel_name: str, currency: str) -> str:
+    """Recherche sans dates : atterrit sur la fiche de l'hôtel."""
     return (
         f"https://www.google.com/travel/search"
         f"?q={quote_plus(hotel_name)}"
-        f"&ts={build_ts(checkin, checkout, adults, currency)}"
         f"&hl=fr&gl=fr&curr={quote_plus(currency)}"
     )
+
+
+def _extract_qs(url: str) -> str | None:
+    """Handle d'entité que Google ajoute à l'URL de la fiche."""
+    return parse_qs(urlparse(url).query).get("qs", [None])[0]
+
+
+def _search_url(hotel_name: str, checkin: str, checkout: str,
+                adults: int, currency: str, qs: str = "") -> str:
+    url = (
+        _base_url(hotel_name, currency)
+        + f"&ts={build_ts(checkin, checkout, adults, currency)}"
+    )
+    if qs:
+        url += f"&qs={quote_plus(qs)}"
+    return url
+
+
+def _is_per_night(page_text: str) -> bool:
+    """Google affiche-t-il un prix par nuit plutôt que le total ?"""
+    if re.search(r"Prix total du séjour", page_text, re.IGNORECASE):
+        return False
+    return bool(re.search(r"Prix total par nuit|par nuit", page_text,
+                          re.IGNORECASE))
 
 
 def _compact(value: str) -> str:
@@ -224,6 +246,44 @@ _RE_STAY_TOTAL = re.compile(
     r"Prix total de\s*([\d\s \xa0.,]+?)\s*€", re.IGNORECASE)
 _RE_STAY_NIGHTS = re.compile(
     r"Prix total de\s*[\d\s \xa0.,]+?\s*€\s*(\d+)\s*nuit", re.IGNORECASE)
+
+
+# Libellé d'accessibilité du prix affiché, le plus fiable de la page :
+#   « 120 € pour les dates 13–15 févr. 2027, Chatrium Hotel Riverside »
+# Il porte le montant, les dates ET le nom de l'hôtel, ce qui permet de
+# vérifier qu'on lit le bon prix pour le bon séjour.
+_RE_PRICE_ARIA = re.compile(
+    r"^([\d\s \xa0.,]+?)\s*€\s*pour les dates\s*(.+?),\s*(.+)$",
+    re.IGNORECASE)
+
+
+def parse_price_aria(label: str, checkin: str, checkout: str,
+                     hotel_name: str) -> float | None:
+    """Montant du libellé d'accessibilité, si dates et hôtel concordent."""
+    m = _RE_PRICE_ARIA.match((label or "").strip())
+    if not m:
+        return None
+    amount_s, dates_s, name_s = m.groups()
+
+    ci = datetime.strptime(checkin, "%Y-%m-%d").date()
+    co = datetime.strptime(checkout, "%Y-%m-%d").date()
+    nums = {int(n) for n in re.findall(r"\d+", dates_s)}
+    if ci.day not in nums or co.day not in nums:
+        return None
+    # L'année n'est affichée que si elle diffère de l'année en cours.
+    years = {n for n in nums if n > 1000}
+    if years and ci.year not in years:
+        return None
+
+    name_low = name_s.lower()
+    words = [w for w in re.findall(r"\w+", hotel_name.lower()) if len(w) > 2]
+    if words and not all(w in name_low for w in words):
+        return None
+
+    try:
+        return _clean_amount(amount_s)
+    except ValueError:
+        return None
 
 
 def extract_stay_total(page_text: str, nights: int) -> float | None:
@@ -287,12 +347,6 @@ _JS_COLLECT_ANCHORS = """
 })
 """
 
-_JS_COLLECT_LINK_TEXTS = """
-() => Array.from(document.querySelectorAll('a')).map(
-  a => (a.textContent || '').trim().slice(0, 160))
-"""
-
-
 def _scrape_hotel(
     *, hotel_name: str, checkin: str, checkout: str, nights: int,
     guests: int, adults: int, currency: str,
@@ -334,37 +388,47 @@ def _scrape_hotel(
             url = _search_url(hotel_name, checkin, checkout, adults,
                               currency)
             result.entry_url = url
+            # Étape 1 : recherche simple, SANS dates. C'est ce qui fait
+            # atterrir Google sur la fiche de l'hôtel ; avec `ts` d'entrée
+            # de jeu il répond parfois par une liste d'hôtels de la ville.
+            page.goto(_base_url(hotel_name, currency),
+                      wait_until="domcontentloaded")
+            _handle_consent(page)
+            _assert_not_blocked(page)
+            page.wait_for_timeout(7000)
+
+            qs = _extract_qs(page.url)
+            if not qs:
+                raise HotelScrapeError(
+                    f"'{hotel_name}' n'a pas de fiche identifiable")
+
+            # Étape 2 : même fiche (épinglée par `qs`) avec les dates.
+            url = _search_url(hotel_name, checkin, checkout, adults,
+                              currency, qs)
+            result.entry_url = url
             page.goto(url, wait_until="domcontentloaded")
             _handle_consent(page)
             _assert_not_blocked(page)
-            page.wait_for_timeout(4000)
-
-            # Repli : page de résultats multiples, il faut ouvrir la fiche.
-            if not _has_provider(page.evaluate(_JS_COLLECT_ANCHORS)):
-                texts = page.evaluate(_JS_COLLECT_LINK_TEXTS)
-                idx = _best_link_index(hotel_name, texts)
-                if idx is None:
-                    raise HotelScrapeError(
-                        f"'{hotel_name}' introuvable dans les résultats")
-                handles = page.query_selector_all("a")
-                if idx >= len(handles):
-                    raise HotelScrapeError("DOM modifié pendant la sélection")
-                result.matched_text = texts[idx]
-                handles[idx].click()
-                page.wait_for_timeout(4000)
-                _assert_not_blocked(page)
-
-            # Le panneau de prix se charge après coup, et Google le
-            # dégrade quand il limite l'IP : on l'attend explicitement.
-            page_text = _wait_for_prices(page)
+            page_text, price_labels = _wait_for_prices(page)
+            per_night = _is_per_night(page_text)
             anchors = page.evaluate(_JS_COLLECT_ANCHORS)
         finally:
             browser.close()
 
+    # Le total explicite l'emporte ; sinon on part du prix affiché, en
+    # le multipliant par le nombre de nuits si Google l'affiche « par
+    # nuit » (c'est son réglage par défaut).
     stay_total = extract_stay_total(page_text, nights)
     if stay_total is None:
+        for label in price_labels:
+            unit = parse_price_aria(label, checkin, checkout, hotel_name)
+            if unit is not None:
+                stay_total = unit * nights if per_night else unit
+                break
+    if stay_total is None:
         raise HotelScrapeError(
-            "panneau de prix absent (limitation Google probable)")
+            "prix introuvable sur la fiche (limitation Google, page de "
+            "liste, ou libellé modifié)")
     result.stay_total_eur = stay_total
 
     # Garde-fou : ne jamais enregistrer un prix pour d'autres dates que
@@ -389,21 +453,28 @@ def _scrape_hotel(
     return result
 
 
-def _wait_for_prices(page, timeout_s: int = 25) -> str:
-    """Attend l'apparition du prix du séjour. Renvoie le texte de la page."""
-    deadline = timeout_s * 1000
+_JS_PRICE_LABELS = """
+() => Array.from(document.querySelectorAll('[aria-label]'))
+  .map(e => e.getAttribute('aria-label'))
+  .filter(a => a && /pour les dates/i.test(a))
+"""
+
+
+def _wait_for_prices(page, timeout_s: int = 25) -> tuple[str, list[str]]:
+    """Attend l'affichage d'un prix. Renvoie (texte de page, libellés)."""
     waited = 0
-    text = ""
-    while waited < deadline:
+    text, labels = "", []
+    while waited < timeout_s * 1000:
         try:
             text = page.inner_text("body")
+            labels = page.evaluate(_JS_PRICE_LABELS)
         except Exception:
-            text = ""
-        if _RE_STAY_TOTAL.search(text):
-            return text
+            text, labels = "", []
+        if _RE_STAY_TOTAL.search(text) or labels:
+            return text, labels
         page.wait_for_timeout(1000)
         waited += 1000
-    return text
+    return text, labels
 
 
 def _assert_not_blocked(page) -> None:
@@ -440,29 +511,6 @@ def _handle_consent(page) -> None:
             except Exception:
                 pass
             return
-
-
-def _has_provider(anchors: list[dict]) -> bool:
-    return any(_identify_provider(a.get("href", "")) for a in anchors)
-
-
-def _best_link_index(hotel_name: str, texts: list[str]) -> int | None:
-    """Index du lien correspondant le mieux au nom de l'hôtel.
-
-    Exige TOUS les mots significatifs du nom : l'ancien seuil « la moitié
-    des mots » acceptait « Chatrium Grand Bangkok » pour « Chatrium
-    Riverside Bangkok ».
-    """
-    words = [w for w in re.findall(r"\w+", hotel_name.lower()) if len(w) > 2]
-    if not words:
-        return None
-    for i, raw in enumerate(texts):
-        text = (raw or "").lower()
-        if not text:
-            continue
-        if all(w in text for w in words):
-            return i
-    return None
 
 
 def _extract_prices(anchors: list[dict]) -> list[HotelPrice]:

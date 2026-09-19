@@ -40,21 +40,6 @@ def test_parse_price() -> None:
     check("texte vide", hotels._parse_price(""), None)
 
 
-# ── _best_link_index ─────────────────────────────────────────────
-
-def test_best_link_index() -> None:
-    textes = [
-        "Hôtels à Bangkok",
-        "Chatrium Grand Bangkok",
-        "Chatrium Riverside Bangkok",
-    ]
-    # L'ancien seuil « la moitié des mots » retenait Chatrium Grand.
-    check("exige tous les mots",
-          hotels._best_link_index("Chatrium Riverside Bangkok", textes), 2)
-    check("aucune correspondance",
-          hotels._best_link_index("Mandarin Oriental", textes), None)
-
-
 # ── _consolidate ─────────────────────────────────────────────────
 
 def _result(prices: list[tuple[str, float, str]]) -> hotels.HotelResult:
@@ -131,6 +116,27 @@ def test_build_ts_reproduit_la_reference() -> None:
     # Les dates demandées doivent réellement changer l'encodage.
     autre = hotels.build_ts("2027-02-13", "2027-02-15", 2, "EUR")
     assert autre != attendu
+
+
+def test_parse_price_aria() -> None:
+    ci, co, nom = "2027-02-13", "2027-02-15", "Chatrium Riverside Bangkok"
+    ok = "120 € pour les dates 13–15 févr. 2027, Chatrium Hotel Riverside Bangkok"
+    check("prix lu", hotels.parse_price_aria(ok, ci, co, nom), 120.0)
+    # Prix affiché pour d'autres dates : à refuser, c'est exactement le
+    # défaut qui a fait enregistrer 4 mois de prix hors sujet.
+    mauvaises = "101 € pour les dates 29–30 nov. 2026, Chatrium Hotel Riverside Bangkok"
+    check("autres dates", hotels.parse_price_aria(mauvaises, ci, co, nom), None)
+    # Prix d'un autre hôtel de la liste.
+    autre = "591 € pour les dates 13–15 févr. 2027, Four Seasons Hotel Bangkok"
+    check("autre hôtel", hotels.parse_price_aria(autre, ci, co, nom), None)
+    check("libellé quelconque",
+          hotels.parse_price_aria("Voir les prix", ci, co, nom), None)
+
+
+def test_is_per_night() -> None:
+    check("mode par nuit", hotels._is_per_night("Prix affiché Prix total par nuit"), True)
+    check("mode total séjour",
+          hotels._is_per_night("Prix total du séjour, taxes et frais compris"), False)
 
 
 def test_dates_look_applied() -> None:
