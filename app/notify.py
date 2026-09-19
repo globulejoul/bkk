@@ -239,28 +239,19 @@ def send_hotel_ntfy(cfg: Config, alert: dict) -> bool:
     tag = "🎯 SEUIL" if alert.get("hit_threshold") else "📉 PRIX BAS"
     title = f"🏨 {alert['price']:.0f}€ — {alert['hotel']}"
     body_lines = [
-        f"**{tag}** — {alert['price']:.0f}€ ({alert['nights']} nuits)",
+        f"**{tag}** — {alert['price']:.0f}€ pour {alert['nights']} nuits",
+        "Prix total du séjour, taxes et frais compris",
         f"{alert['hotel']}",
         f"{alert['checkin']} → {alert['checkout']}",
-        f"Source: {alert['source']}",
     ]
     prev = alert.get("previous_low")
     if prev:
         body_lines.append(f"Précédent bas: {prev:.0f}€")
 
-    providers = alert.get("providers") or []
-    if providers:
+    seen = alert.get("providers_seen") or []
+    if seen:
         body_lines.append("")
-        body_lines.append("**Comparaison providers:**")
-        # Trier sur l'équivalent EUR : comparer 4 000 THB et 110 EUR
-        # par ordre numérique donnerait un classement absurde.
-        for p in sorted(providers,
-                        key=lambda x: x.get("price_eur") or x["price"]):
-            line = f"• {p['source']}: {p['price']:.0f} {p['currency']}"
-            eur = p.get("price_eur")
-            if eur is not None and p["currency"] != "EUR":
-                line += f" ≈ {eur:.0f}€"
-            body_lines.append(line)
+        body_lines.append("Offres vues chez : " + ", ".join(seen))
 
     headers = {
         "Title": title.encode("utf-8"),

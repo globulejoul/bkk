@@ -65,64 +65,52 @@ def _result(prices: list[tuple[str, float, str]]) -> hotels.HotelResult:
     return r
 
 
-def test_consolidate_rejette_aberrant() -> None:
-    # Cas réel : Priceline à 49 € contre un médian de ~120 € avait figé
-    # lowest_price_eur, rendant toute alerte « nouveau bas » impossible.
+def test_consolidate_retient_le_total_sejour() -> None:
+    # Les montants lus près des liens providers n'ont pas de sémantique
+    # garantie : c'est ainsi qu'un 144 € ne correspondant à aucune offre
+    # réelle avait été enregistré. Seul le total annoncé fait foi.
     r = _result([
-        ("Expedia", 152.0, "EUR"),
-        ("Hotels.com", 153.0, "EUR"),
-        ("Trip.com", 130.0, "EUR"),
-        ("Agoda", 117.0, "EUR"),
-        ("Priceline", 49.0, "EUR"),
+        ("Trip.com", 144.0, "EUR"),
+        ("Priceline", 170.0, "EUR"),
+        ("Expedia", 183.0, "EUR"),
     ])
+    r.stay_total_eur = 240.0
     hotels._consolidate(r, None)
-    sources = {p.source for p in r.prices}
-    assert "Priceline" not in sources, "l'aberrant 49 € aurait dû être écarté"
-    check("meilleur prix retenu", r.best_price_eur, 117.0)
-    check("meilleure source", r.best_source, "Agoda")
-    assert r.rejected and "Priceline" in r.rejected[0]
+    check("prix retenu", r.best_price_eur, 240.0)
+    check("source", r.best_source, "Google")
+    check("une seule ligne persistée", len(r.prices), 1)
+    check("providers conservés pour information", r.providers_seen,
+          ["Expedia", "Priceline", "Trip.com"])
 
 
-def test_consolidate_dedoublonne() -> None:
-    r = _result([
-        ("Agoda", 140.0, "EUR"),
-        ("Agoda", 120.0, "EUR"),
-        ("Expedia", 130.0, "EUR"),
-        ("Trip.com", 125.0, "EUR"),
-    ])
+def test_consolidate_sans_total() -> None:
+    r = _result([("Trip.com", 144.0, "EUR")])
+    r.stay_total_eur = None
     hotels._consolidate(r, None)
-    check("un prix par provider", len(r.prices), 3)
-    check("le moins cher du provider", r.best_price_eur, 120.0)
+    check("aucun prix", r.best_price_eur, None)
+    check("rien à persister", len(r.prices), 0)
 
 
-def test_consolidate_convertit_avant_comparaison() -> None:
-    # 4 000 THB ≈ 104 € : moins cher que 120 €, mais numériquement
-    # supérieur. Sans conversion préalable, le best était faux.
-    def to_eur(amount: float, currency: str) -> float | None:
-        return amount / 38.5 if currency == "THB" else None
-
-    r = _result([
-        ("Agoda", 4000.0, "THB"),
-        ("Expedia", 120.0, "EUR"),
-        ("Trip.com", 125.0, "EUR"),
-    ])
-    hotels._consolidate(r, to_eur)
-    check("best en THB converti", r.best_source, "Agoda")
-    assert r.best_price_eur is not None and 103 < r.best_price_eur < 105
-
-
-def test_consolidate_devise_inconnue_ecartee() -> None:
-    r = _result([("Agoda", 4000.0, "THB"), ("Expedia", 120.0, "EUR")])
-    hotels._consolidate(r, lambda a, c: None)
-    check("seul l'EUR survit", [p.source for p in r.prices], ["Expedia"])
-    assert any("devise inconnue" in x for x in r.rejected)
-
-
-def test_consolidate_sans_prix() -> None:
+def test_consolidate_total_hors_bornes() -> None:
     r = _result([])
+    r.stay_total_eur = 3.0
     hotels._consolidate(r, None)
-    check("aucun best", r.best_price_eur, None)
-    check("source vide", r.best_source, "")
+    check("montant absurde rejeté", r.best_price_eur, None)
+    assert any("hors bornes" in x for x in r.rejected)
+
+
+# ── extract_stay_total ───────────────────────────────────────────
+
+def test_extract_stay_total() -> None:
+    txt = "120 €Prix total de 240 €2 nuits (taxes et frais compris)"
+    check("total lu", hotels.extract_stay_total(txt, 2), 240.0)
+    # Google annonce un autre nombre de nuits : on refuse le montant
+    # plutôt que d'enregistrer un prix qui ne correspond pas au séjour.
+    check("nuits incohérentes", hotels.extract_stay_total(txt, 3), None)
+    check("libellé absent", hotels.extract_stay_total("aucun prix ici", 2), None)
+    check("texte vide", hotels.extract_stay_total("", 2), None)
+    sans_nuits = "Prix total de 1.234 € taxes comprises"
+    check("milliers", hotels.extract_stay_total(sans_nuits, 2), 1234.0)
 
 
 # ── URLs ─────────────────────────────────────────────────────────

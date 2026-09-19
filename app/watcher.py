@@ -700,11 +700,9 @@ def _check_hotel(cfg: Config, hotel: HotelWatch,
         "checkin": checkin,
         "checkout": checkout,
         "nights": nights,
-        "providers": [
-            {"source": p.source, "price": p.price, "currency": p.currency,
-             "price_eur": p.price_eur}
-            for p in result.prices
-        ],
+        # Noms seulement : les montants affichés à côté des liens
+        # providers n'ont pas de sémantique fiable (voir hotels.py).
+        "providers_seen": result.providers_seen,
     }
     delivered = notify.send_hotel_ntfy(cfg, payload)
     with db.conn() as c:

@@ -3,14 +3,15 @@
 Les dates de séjour voyagent dans le paramètre `ts` (protobuf base64) :
 Google ignore `checkin`/`checkout` en clair et répondrait avec ses dates
 par défaut. Un contrôle vérifie ensuite que les liens providers portent
-bien les dates demandées. L'extraction se fait en UN aller-retour DOM,
-puis les montants aberrants sont écartés par comparaison au médian.
+bien les dates demandées. Le prix retenu est celui que Google étiquette
+« Prix total de X € — N nuits (taxes et frais compris) », seul montant
+dont la sémantique est certaine ; en son absence le scrape échoue au
+lieu d'enregistrer une valeur douteuse.
 """
 from __future__ import annotations
 
 import base64
 import re
-import statistics
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -52,6 +53,8 @@ class HotelResult:
     entry_url: str = ""       # URL réellement utilisée (traçabilité)
     matched_text: str = ""    # libellé du lien cliqué, si repli recherche
     dates_confirmed: bool = False  # un lien provider porte bien les dates
+    stay_total_eur: float | None = None  # « Prix total de X € », référence
+    providers_seen: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)  # montants écartés
 
 
@@ -70,12 +73,6 @@ _PROVIDERS = {
 # Un séjour plausible, en EUR, après conversion. Hors bornes = parsing raté.
 _MIN_EUR = 10.0
 _MAX_EUR = 20000.0
-# Un prix provider s'écartant trop du médian des autres providers est
-# presque toujours une erreur d'extraction (prix par nuit, prix barré,
-# montant d'un bloc voisin). Observé en production : 49 € contre un
-# médian de ~120 €, qui a figé le plus-bas historique.
-_OUTLIER_LOW = 0.55
-_OUTLIER_HIGH = 1.9
 
 
 def search_hotel(
@@ -217,6 +214,40 @@ def _compact(value: str) -> str:
     return value.replace("-", "")
 
 
+# Google étiquette explicitement le prix du séjour :
+#   « 120 € Prix total de 240 € 2 nuits (taxes et frais compris) »
+# C'est le seul montant dont la sémantique est certaine. L'ancienne
+# méthode prenait le premier « N € » trouvé dans le conteneur d'un lien
+# provider, qui pouvait appartenir à un bloc voisin : elle a produit un
+# 144 € ne correspondant à aucune offre réelle.
+_RE_STAY_TOTAL = re.compile(
+    r"Prix total de\s*([\d\s \xa0.,]+?)\s*€", re.IGNORECASE)
+_RE_STAY_NIGHTS = re.compile(
+    r"Prix total de\s*[\d\s \xa0.,]+?\s*€\s*(\d+)\s*nuit", re.IGNORECASE)
+
+
+def extract_stay_total(page_text: str, nights: int) -> float | None:
+    """Prix total du séjour, taxes et frais compris, ou None.
+
+    Si Google précise un nombre de nuits différent de celui demandé, le
+    montant est refusé : mieux vaut aucune donnée qu'une mauvaise.
+    """
+    if not page_text:
+        return None
+    m = _RE_STAY_TOTAL.search(page_text)
+    if not m:
+        return None
+    mn = _RE_STAY_NIGHTS.search(page_text)
+    if mn and int(mn.group(1)) != nights:
+        print(f"  Hotels: ⚠ Google annonce {mn.group(1)} nuits "
+              f"au lieu de {nights}, montant refusé")
+        return None
+    try:
+        return _clean_amount(m.group(1))
+    except ValueError:
+        return None
+
+
 def _dates_look_applied(anchors: list[dict], checkin: str,
                         checkout: str) -> bool | None:
     """Les liens providers portent-ils bien les dates demandées ?
@@ -306,11 +337,10 @@ def _scrape_hotel(
             page.goto(url, wait_until="domcontentloaded")
             _handle_consent(page)
             _assert_not_blocked(page)
-            page.wait_for_timeout(6000)
-            anchors = page.evaluate(_JS_COLLECT_ANCHORS)
+            page.wait_for_timeout(4000)
 
             # Repli : page de résultats multiples, il faut ouvrir la fiche.
-            if not _has_provider(anchors):
+            if not _has_provider(page.evaluate(_JS_COLLECT_ANCHORS)):
                 texts = page.evaluate(_JS_COLLECT_LINK_TEXTS)
                 idx = _best_link_index(hotel_name, texts)
                 if idx is None:
@@ -321,11 +351,21 @@ def _scrape_hotel(
                     raise HotelScrapeError("DOM modifié pendant la sélection")
                 result.matched_text = texts[idx]
                 handles[idx].click()
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(4000)
                 _assert_not_blocked(page)
-                anchors = page.evaluate(_JS_COLLECT_ANCHORS)
+
+            # Le panneau de prix se charge après coup, et Google le
+            # dégrade quand il limite l'IP : on l'attend explicitement.
+            page_text = _wait_for_prices(page)
+            anchors = page.evaluate(_JS_COLLECT_ANCHORS)
         finally:
             browser.close()
+
+    stay_total = extract_stay_total(page_text, nights)
+    if stay_total is None:
+        raise HotelScrapeError(
+            "panneau de prix absent (limitation Google probable)")
+    result.stay_total_eur = stay_total
 
     # Garde-fou : ne jamais enregistrer un prix pour d'autres dates que
     # celles demandées. C'est ce contrôle qui manquait jusqu'ici.
@@ -340,13 +380,30 @@ def _scrape_hotel(
     result.prices = _extract_prices(anchors)
     _consolidate(result, to_eur)
 
-    print(f"  Hotels: {len(result.prices)} providers, "
-          f"best={result.best_price} {result.best_currency} "
-          f"({result.best_source})")
+    print(f"  Hotels: total séjour {result.best_price_eur} € "
+          f"({nights} nuits, taxes comprises) — providers vus : "
+          f"{', '.join(result.providers_seen) or 'aucun'}")
     if result.rejected:
         print(f"  Hotels: écartés → {', '.join(result.rejected)}")
 
     return result
+
+
+def _wait_for_prices(page, timeout_s: int = 25) -> str:
+    """Attend l'apparition du prix du séjour. Renvoie le texte de la page."""
+    deadline = timeout_s * 1000
+    waited = 0
+    text = ""
+    while waited < deadline:
+        try:
+            text = page.inner_text("body")
+        except Exception:
+            text = ""
+        if _RE_STAY_TOTAL.search(text):
+            return text
+        page.wait_for_timeout(1000)
+        waited += 1000
+    return text
 
 
 def _assert_not_blocked(page) -> None:
@@ -426,60 +483,32 @@ def _extract_prices(anchors: list[dict]) -> list[HotelPrice]:
 
 
 def _consolidate(result: HotelResult, to_eur: ToEur | None) -> None:
-    """Déduplique par provider, convertit en EUR, écarte les aberrants.
+    """Retient le prix du séjour annoncé par Google comme prix de référence.
 
-    Fonction pure (hors `to_eur`) : testable sans navigateur.
+    Les montants lus à côté des liens providers n'ont pas de sémantique
+    garantie (par nuit ou total, taxes comprises ou non, parfois un
+    montant d'un bloc voisin) : ils ne sont plus utilisés comme prix.
+    Seuls leurs noms sont conservés, à titre indicatif.
     """
-    # 1) Un prix par provider : le moins cher.
-    seen: dict[str, HotelPrice] = {}
-    for hp in result.prices:
-        if hp.source not in seen or hp.price < seen[hp.source].price:
-            seen[hp.source] = hp
+    result.providers_seen = sorted({hp.source for hp in result.prices})
 
-    # 2) Conversion en EUR AVANT toute comparaison : comparer 1 200 THB
-    #    et 120 EUR par ordre numérique n'a aucun sens.
-    kept: list[HotelPrice] = []
-    for hp in seen.values():
-        if hp.currency == "EUR":
-            hp.price_eur = hp.price
-        elif to_eur is not None:
-            hp.price_eur = to_eur(hp.price, hp.currency)
-        if hp.price_eur is None:
-            result.rejected.append(
-                f"{hp.source} {hp.price:.0f} {hp.currency} (devise inconnue)")
-            continue
-        if not (_MIN_EUR <= hp.price_eur <= _MAX_EUR):
-            result.rejected.append(
-                f"{hp.source} {hp.price_eur:.0f}€ (hors bornes)")
-            continue
-        kept.append(hp)
-
-    # 3) Rejet des valeurs aberrantes par rapport au médian des providers.
-    if len(kept) >= 3:
-        median = statistics.median(hp.price_eur for hp in kept)
-        plausible = [
-            hp for hp in kept
-            if _OUTLIER_LOW * median <= hp.price_eur <= _OUTLIER_HIGH * median
-        ]
-        for hp in kept:
-            if hp not in plausible:
-                result.rejected.append(
-                    f"{hp.source} {hp.price_eur:.0f}€ "
-                    f"(médian {median:.0f}€)")
-        kept = plausible
-
-    result.prices = sorted(kept, key=lambda hp: hp.price_eur or 0.0)
-
-    if result.prices:
-        best = result.prices[0]
-        result.best_price = best.price
-        result.best_currency = best.currency
-        result.best_source = best.source
-        result.best_price_eur = best.price_eur
-    else:
+    total = result.stay_total_eur
+    if total is None or not (_MIN_EUR <= total <= _MAX_EUR):
+        result.prices = []
         result.best_price = None
         result.best_price_eur = None
         result.best_source = ""
+        if total is not None:
+            result.rejected.append(f"total séjour {total:.0f}€ (hors bornes)")
+        return
+
+    entry = HotelPrice(source="Google", price=total, currency="EUR",
+                       url=result.entry_url, price_eur=total)
+    result.prices = [entry]
+    result.best_price = total
+    result.best_currency = "EUR"
+    result.best_source = "Google"
+    result.best_price_eur = total
 
 
 def _identify_provider(href: str) -> str | None:
