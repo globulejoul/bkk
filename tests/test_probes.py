@@ -265,6 +265,85 @@ def test_provider_exhaustion_closes_the_bucket() -> None:
                   db.probe_quota_used(c, "AFKL_API_KEY"), 50)
 
 
+def test_provider_refusal_pauses_instead_of_burning_the_day() -> None:
+    """Un 403 du fournisseur met le seau en PAUSE, il ne condamne pas la
+    journée : notre clé de jour est Europe/Paris, la sienne est inconnue,
+    et un refus reçu juste après minuit peut appartenir à sa journée de
+    la veille."""
+    with _Env():
+        plus_tard = (datetime.now() + timedelta(hours=3)).isoformat()
+        deja_passe = (datetime.now() - timedelta(minutes=1)).isoformat()
+        with db.conn() as c:
+            check("jeton avant pause",
+                  db.probe_quota_take(c, "AFKL_API_KEY", 80), True)
+            db.probe_quota_block(c, "AFKL_API_KEY", 80, until=plus_tard)
+            check("refusé pendant la pause",
+                  db.probe_quota_take(c, "AFKL_API_KEY", 80), False)
+            # La journée n'est PAS brûlée : un seul jeton consommé.
+            check("compteur préservé",
+                  db.probe_quota_used(c, "AFKL_API_KEY"), 1)
+            # Une fois la pause écoulée, la sonde repart.
+            db.probe_quota_block(c, "AFKL_API_KEY", 80, until=deja_passe)
+            check("reprise après la pause",
+                  db.probe_quota_take(c, "AFKL_API_KEY", 80), True)
+
+
+def test_provider_refusal_closes_day_when_counter_agrees() -> None:
+    """Si notre propre compteur est déjà à la moitié du plafond, le refus
+    du fournisseur est un vrai épuisement : là, on ferme la journée."""
+    with _Env():
+        plus_tard = (datetime.now() + timedelta(hours=3)).isoformat()
+        with db.conn() as c:
+            for _ in range(5):
+                db.probe_quota_take(c, "AFKL_API_KEY", 10)
+            check("moitié consommée",
+                  db.probe_quota_used(c, "AFKL_API_KEY"), 5)
+            db.probe_quota_block(c, "AFKL_API_KEY", 10, until=plus_tard)
+            check("journée fermée",
+                  db.probe_quota_used(c, "AFKL_API_KEY"), 10)
+
+
+def test_product_hash_tracks_what_is_measured() -> None:
+    """Changer de compagnie ou de cabine change le produit mesuré : sans
+    ça le « plus bas » resterait celui d'un produit abandonné et l'alerte
+    ne repartirait jamais."""
+    cfg = Config(origins=["CDG"], destinations=["BKK"], adults=1,
+                 children=[9, 11])
+    af = _probe(travel_host="AF")
+    check("stable", probes.product_hash(cfg, af),
+          probes.product_hash(cfg, af))
+    assert probes.product_hash(cfg, _probe(travel_host="KL")) \
+        != probes.product_hash(cfg, af), "la compagnie doit compter"
+    assert probes.product_hash(cfg, _probe(cabin="BUSINESS")) \
+        != probes.product_hash(cfg, af), "la cabine doit compter"
+    assert probes.product_hash(cfg, _probe(passengers="family")) \
+        != probes.product_hash(cfg, af), "les passagers doivent compter"
+
+
+def test_probe_state_roundtrip() -> None:
+    with _Env():
+        now = datetime.now().isoformat()
+        with db.conn() as c:
+            db.probe_state_set(c, "af-cdg-bkk", "Hiver 2027",
+                               lowest_price_eur=1263.31,
+                               lowest_out="2027-02-13",
+                               lowest_ret="2027-02-27",
+                               product_hash="abcd")
+            s = db.probe_cursor_get(c, "af-cdg-bkk", "Hiver 2027")
+            check("plus bas mémorisé", s["lowest_price_eur"], 1263.31)
+            check("empreinte produit", s["product_hash"], "abcd")
+            # L'écriture d'état ne doit pas écraser le curseur de rotation.
+            db.probe_cursor_set(c, "af-cdg-bkk", "Hiver 2027",
+                                last_out="2027-02-14", last_ret="2027-02-28",
+                                grid_hash="xyz", now=now)
+            db.probe_state_set(c, "af-cdg-bkk", "Hiver 2027",
+                               last_alert_at=now)
+            s = db.probe_cursor_get(c, "af-cdg-bkk", "Hiver 2027")
+            check("curseur intact", s["last_out"], "2027-02-14")
+            check("plus bas intact", s["lowest_price_eur"], 1263.31)
+            check("alerte horodatée", s["last_alert_at"], now)
+
+
 def test_bucket_is_the_credential() -> None:
     """Le seau est le nom de la variable d'environnement : deux sondes
     sur la même clé ne peuvent pas déclarer deux plafonds."""
@@ -434,6 +513,10 @@ def main() -> None:
                test_single_cell_mode_eventually_covers_the_anchor,
                test_cursor_does_not_skip_a_partial_cell,
                test_provider_exhaustion_closes_the_bucket,
+               test_provider_refusal_pauses_instead_of_burning_the_day,
+               test_provider_refusal_closes_day_when_counter_agrees,
+               test_product_hash_tracks_what_is_measured,
+               test_probe_state_roundtrip,
                test_bucket_is_the_credential,
                test_median_mode_queries_only_the_anchor,
                test_probe_rows_never_reach_market_queries,

@@ -392,6 +392,84 @@ def _run_probes(cfg: Config, trip: Trip, combos: dict[str, list[str]],
                      f"sur {report['calls']} requêtes{perdu}{arret}")
         if report["exhausted"]:
             _notify_probe_exhausted(cfg, probe)
+        _probe_alert(cfg, probe, trip, report, now)
+
+
+PROBE_ALERT_COOLDOWN_H = 12
+PROBE_FAILURES_BEFORE_ALERT = 3
+
+
+def _probe_alert(cfg: Config, probe: Probe, trip: Trip,
+                 report: dict[str, Any], now: str) -> None:
+    """Alerte « nouveau plus bas » PROPRE à une sonde.
+
+    Une sonde ne voit qu'une compagnie : elle ne peut rien dire du
+    marché, donc rien de ceci ne touche `state`, la fenêtre glissante ou
+    le 10e percentile. Sa référence est son propre historique, remis à
+    zéro quand le produit mesuré change (compagnie, cabine, passagers) —
+    sinon le « plus bas » resterait celui d'un produit qu'elle ne mesure
+    plus et l'alerte ne repartirait jamais.
+    """
+    best = report.get("best")
+    phash = probes.product_hash(cfg, probe)
+
+    with db.conn() as c:
+        state = db.probe_cursor_get(c, probe.name, trip.name) or {}
+
+        # Panne de sonde : même seuil que les hôtels, 3 échecs d'affilée.
+        failures = state.get("consecutive_failures") or 0
+        if failures == PROBE_FAILURES_BEFORE_ALERT:
+            notify.send_ops_ntfy(
+                cfg, f"🔎 Sonde en panne — {probe.name}",
+                f"{PROBE_FAILURES_BEFORE_ALERT} échecs consécutifs sur "
+                f"{trip.name}.\nDernière raison : "
+                f"{state.get('last_error') or 'inconnue'}")
+
+        if best is None:
+            return
+
+        previous = state.get("lowest_price_eur")
+        if state.get("product_hash") != phash:
+            # Produit changé : l'ancienne référence ne vaut plus rien.
+            previous = None
+            db.probe_state_set(c, probe.name, trip.name,
+                               product_hash=phash, lowest_price_eur=None,
+                               lowest_out=None, lowest_ret=None)
+
+        price = best["price_eur"]
+        # Marge de 0,50 € : identique au marché, elle évite d'alerter sur
+        # un arrondi de conversion.
+        is_low = previous is None or price < previous - 0.5
+        if not is_low:
+            return
+
+        db.probe_state_set(c, probe.name, trip.name,
+                           lowest_price_eur=price,
+                           lowest_out=best["outbound_date"],
+                           lowest_ret=best["return_date"],
+                           lowest_seen_at=now, product_hash=phash)
+
+        # Le plus bas est enregistré même si la notification est retenue :
+        # la référence doit suivre la réalité, pas la cadence d'alerte.
+        if not _alert_cooldown_passed(state.get("last_alert_at"), now,
+                                      hours=PROBE_ALERT_COOLDOWN_H):
+            log.info(f"  🔎 sonde {probe.name}: nouveau bas {price:.0f}€ "
+                     "(notification en pause)")
+            return
+
+        payload = {
+            "kind": "probe_low", "probe": probe.name,
+            "carrier": probe.travel_host, "trip": trip.name,
+            "price": price, "previous_low": previous,
+            **{k: best[k] for k in ("origin", "destination", "outbound_date",
+                                    "return_date", "airlines", "fare_family",
+                                    "out_stops", "ret_stops")},
+        }
+        db.log_alert(c, trip.name, "probe_low", price, payload)
+        db.probe_state_set(c, probe.name, trip.name, last_alert_at=now)
+
+    if notify.send_probe_ntfy(cfg, payload):
+        log.info(f"  🔔 sonde {probe.name}: alerte envoyée ({price:.0f}€)")
 
 
 def _notify_probe_exhausted(cfg: Config, probe: Probe) -> None:

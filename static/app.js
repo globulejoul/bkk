@@ -15,6 +15,10 @@ const dateFmt = (s) => s
   ? _asDate(String(s)).toLocaleDateString('fr-FR', _tzOpts(String(s))) : '—';
 const dateTimeFmt = (s) => s
   ? _asDate(String(s)).toLocaleString('fr-FR', _tzOpts(String(s))) : '—';
+// Libellés des compagnies interrogées par les sondes. Déclaré ici, avec
+// les autres helpers, parce que renderAlerts s'en sert bien avant la
+// section admin où il vivait.
+const CARRIER_LABEL = { AF: 'Air France', KL: 'KLM' };
 const sourceLabel = (s) => {
   if (!s) return '—';
   if (s === 'duffel') return 'Compagnies';
@@ -591,6 +595,7 @@ async function loadTripDetail() {
 
   // Heatmap
   loadHeatmap(name, seq);
+  loadProbeHeatmap(name, seq);
 
   // Stats
   loadTripStats(name, seq);
@@ -598,90 +603,145 @@ async function loadTripDetail() {
 
 // ── Heatmap ────────────────────────────────────────
 
+// Construit la table d'une grille aller x retour. Partagee par le
+// calendrier de marche et celui des sondes : deux sources differentes,
+// une seule forme — dupliquer le rendu les aurait fait diverger.
+function buildHeatmapTable(data, opts) {
+  opts = opts || {};
+  const outDates = data.outbound_dates || [];
+  const retDates = data.return_dates || [];
+  const prices = data.prices || [];
+  const lastSeen = opts.lastSeen || {};
+  if (!outDates.length || !retDates.length) return null;
+
+  let count = 0;
+  let minPrice = Infinity, maxPrice = -Infinity;
+  let minOut = -1, minRet = -1;
+  for (let i = 0; i < outDates.length; i++) {
+    for (let j = 0; j < retDates.length; j++) {
+      const p = prices[i] && prices[i][j];
+      if (p != null && p > 0) {
+        count++;
+        if (p < minPrice) { minPrice = p; minOut = i; minRet = j; }
+        if (p > maxPrice) maxPrice = p;
+      }
+    }
+  }
+  if (!count) return null;
+  const range = maxPrice - minPrice || 1;
+
+  const table = document.createElement('table');
+  table.className = 'hm-table';
+
+  const thead = document.createElement('thead');
+  let headerRow = '<tr><th class="hm-corner">Aller \ Retour</th>';
+  retDates.forEach(d => {
+    headerRow += `<th class="hm-col-header">${esc(dateFmt(d))}</th>`;
+  });
+  thead.innerHTML = headerRow + '</tr>';
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  for (let i = 0; i < outDates.length; i++) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<th class="hm-row-header">${esc(dateFmt(outDates[i]))}</th>`;
+    for (let j = 0; j < retDates.length; j++) {
+      const td = document.createElement('td');
+      const p = prices[i] && prices[i][j];
+      if (p != null && p > 0) {
+        const t = (p - minPrice) / range; // 0 = moins cher (vert), 1 = plus cher
+        td.className = 'hm-cell';
+        td.style.backgroundColor = lerpColor('#00714c', '#d35b17', t);
+        td.textContent = Math.round(p) + ' €';
+        let title = dateFmt(outDates[i]) + ' → ' + dateFmt(retDates[j])
+          + ' : ' + Math.round(p) + ' €';
+        // Les cellules d'une sonde sont relevees a des dates differentes :
+        // sans cet horodatage, une cellule vieille d'une semaine se lit
+        // comme un prix du jour, et les cellules anciennes paraissent
+        // systematiquement moins cheres (les prix montent a l'approche).
+        const seen = lastSeen[outDates[i] + '>' + retDates[j]];
+        if (seen) title += ' · relevé le ' + dateFmt(seen);
+        td.title = title;
+        if (i === minOut && j === minRet) td.classList.add('hm-cheapest');
+      } else {
+        td.className = 'hm-cell hm-empty';
+        td.textContent = '—';
+      }
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
 async function loadHeatmap(tripName, seq) {
   const container = $('#heatmap-grid');
   container.innerHTML = '';
   try {
     const data = await api(`/api/trips/${encodeURIComponent(tripName)}/heatmap`);
-    // Un chargement plus récent a pris la main : ne pas écraser son rendu.
+    // Un chargement plus recent a pris la main : ne pas ecraser son rendu.
     if (seq !== undefined && seq !== _tripSeq) return;
-
-    if (!data || !data.outbound_dates || !data.return_dates || !data.prices
-        || !data.outbound_dates.length || !data.return_dates.length) {
+    const table = data ? buildHeatmapTable(data) : null;
+    if (!table) {
       container.innerHTML = '<div class="hm-no-data">Pas de données</div>';
       return;
     }
-
-    const outDates = data.outbound_dates;
-    const retDates = data.return_dates;
-    const prices = data.prices; // 2D array: prices[outIdx][retIdx]
-
-    // Find min/max for color scale
-    let allPrices = [];
-    let minPrice = Infinity, maxPrice = -Infinity;
-    let minOut = -1, minRet = -1;
-    for (let i = 0; i < outDates.length; i++) {
-      for (let j = 0; j < retDates.length; j++) {
-        const p = prices[i] && prices[i][j];
-        if (p != null && p > 0) {
-          allPrices.push(p);
-          if (p < minPrice) { minPrice = p; minOut = i; minRet = j; }
-          if (p > maxPrice) maxPrice = p;
-        }
-      }
-    }
-
-    if (!allPrices.length) {
-      container.innerHTML = '<div class="hm-no-data">Pas de données</div>';
-      return;
-    }
-
-    const range = maxPrice - minPrice || 1;
-
-    // Build table
-    const table = document.createElement('table');
-    table.className = 'hm-table';
-
-    // Header row: corner + return dates
-    const thead = document.createElement('thead');
-    let headerRow = '<tr><th class="hm-corner">Aller \\ Retour</th>';
-    retDates.forEach(d => {
-      headerRow += `<th class="hm-col-header">${esc(dateFmt(d))}</th>`;
-    });
-    headerRow += '</tr>';
-    thead.innerHTML = headerRow;
-    table.appendChild(thead);
-
-    // Body rows: outbound date + cells
-    const tbody = document.createElement('tbody');
-    for (let i = 0; i < outDates.length; i++) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<th class="hm-row-header">${esc(dateFmt(outDates[i]))}</th>`;
-      for (let j = 0; j < retDates.length; j++) {
-        const td = document.createElement('td');
-        const p = prices[i] && prices[i][j];
-        if (p != null && p > 0) {
-          const t = (p - minPrice) / range; // 0=cheapest(green), 1=most expensive(orange)
-          const bg = lerpColor('#00714c', '#d35b17', t);
-          td.className = 'hm-cell';
-          td.style.backgroundColor = bg;
-          td.textContent = Math.round(p) + '\u202F\u20AC';
-          td.title = dateFmt(outDates[i]) + ' \u2192 ' + dateFmt(retDates[j]) + ' : ' + Math.round(p) + '\u202F\u20AC';
-          if (i === minOut && j === minRet) {
-            td.classList.add('hm-cheapest');
-          }
-        } else {
-          td.className = 'hm-cell hm-empty';
-          td.textContent = '\u2014';
-        }
-        tr.appendChild(td);
-      }
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
     container.appendChild(table);
   } catch (e) {
     container.innerHTML = '<div class="hm-no-data">Pas de données</div>';
+  }
+}
+
+// ── Calendrier d'une sonde ─────────────────────────
+
+let _probeTrip = null;
+
+async function loadProbeHeatmap(tripName, seq) {
+  const wrap = $('#probe-heatmap');
+  const select = $('#probe-heatmap-select');
+  const grid = $('#probe-heatmap-grid');
+  if (!wrap || !select || !grid) return;
+  _probeTrip = tripName;
+  wrap.hidden = true;
+  grid.innerHTML = '';
+  try {
+    const list = await api(`/api/trips/${encodeURIComponent(tripName)}/probes`);
+    if (seq !== undefined && seq !== _tripSeq) return;
+    // Aucune sonde n'a encore de releve : on masque toute la section
+    // plutot que d'afficher un cadre vide sans explication.
+    if (!Array.isArray(list) || !list.length) return;
+
+    select.innerHTML = list.map(p => {
+      const label = esc(p.probe)
+        + (p.carriers ? ' — ' + esc(p.carriers) : '')
+        + ' (' + (p.cells || 0) + ' cellule' + ((p.cells || 0) > 1 ? 's' : '') + ')';
+      return `<option value="${attr(p.probe)}">${label}</option>`;
+    }).join('');
+    select.style.display = list.length > 1 ? '' : 'none';
+    wrap.hidden = false;
+    await renderProbeHeatmap(tripName, list[0].probe, seq);
+  } catch (e) {
+    wrap.hidden = true;
+  }
+}
+
+async function renderProbeHeatmap(tripName, probe, seq) {
+  const grid = $('#probe-heatmap-grid');
+  grid.innerHTML = '';
+  try {
+    const data = await api(`/api/trips/${encodeURIComponent(tripName)}`
+      + `/probe-heatmap?probe=${encodeURIComponent(probe)}`);
+    if (seq !== undefined && seq !== _tripSeq) return;
+    const table = data
+      ? buildHeatmapTable(data, { lastSeen: data.last_seen }) : null;
+    if (!table) {
+      grid.innerHTML = '<div class="hm-no-data">Pas encore de relevé</div>';
+      return;
+    }
+    grid.appendChild(table);
+  } catch (e) {
+    grid.innerHTML = '<div class="hm-no-data">Pas encore de relevé</div>';
   }
 }
 
@@ -888,6 +948,7 @@ async function loadAlerts() {
   alerts.forEach(a => {
     const p = a.payload || {};
     const isHotel = a.kind === 'hotel_low';
+    const isProbe = a.kind === 'probe_low';
     const card = document.createElement('div');
     let cls = 'alert-card';
     if (a.kind === 'rise') cls += ' rise';
@@ -895,7 +956,13 @@ async function loadAlerts() {
     card.className = cls;
     // Une alerte hôtel n'a ni compagnie ni origine/destination : sans branche
     // dédiée elle s'affichait en « 📉 Nouveau bas • ? → ? ».
+    // Une alerte de sonde, elle, a la même forme qu'une alerte de marché
+    // mais ne dit PAS la même chose : c'est le plus bas d'une seule
+    // compagnie. Sans libellé distinct, elle se lit comme un mouvement du
+    // marché qui n'a pas eu lieu.
+    const carrierLabel = CARRIER_LABEL[p.carrier] || p.carrier || 'compagnie';
     const kindLabel = isHotel ? (p.hit_threshold ? '🏨 Seuil atteint' : '🏨 Hôtel')
+      : isProbe ? `✈️ Plus bas ${esc(carrierLabel)}`
       : a.kind === 'rise' ? '📈 Hausse'
       : p.hit_threshold ? '🎯 Seuil atteint' : '📉 Nouveau bas';
     let meta;
@@ -1589,7 +1656,6 @@ function renderHotelsAdmin() {
 // seule ne dit pas si la sonde tourne reellement.
 let _probeStatus = [];
 
-const CARRIER_LABEL = { AF: 'Air France', KL: 'KLM' };
 
 function renderProbesAdmin() {
   const container = $('#admin-probes');
@@ -1939,6 +2005,9 @@ $('#btn-add-dest').addEventListener('click', addDestination);
 $('#admin-save').addEventListener('click', saveConfig);
 $('#btn-add-hotel').addEventListener('click', addHotel);
 $('#btn-add-probe').addEventListener('click', addProbe);
+$('#probe-heatmap-select').addEventListener('change', (e) => {
+  if (_probeTrip) renderProbeHeatmap(_probeTrip, e.target.value, _tripSeq);
+});
 $('#admin-test-notif').addEventListener('click', testNotification);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id === 'add-origin') addOrigin();

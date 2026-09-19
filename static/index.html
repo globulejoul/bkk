@@ -102,6 +102,22 @@
         <h2>Calendrier des prix</h2>
         <div id="heatmap-grid"></div>
       </div>
+      <!-- Grille d'une sonde : une seule compagnie, jamais melangee au
+           calendrier de marche ci-dessus. fli est multi-compagnies et trie
+           au moins cher, donc <= une compagnie seule par construction :
+           fondus dans le meme minimum, ils auraient peint en « meilleure
+           date » la seule cellule que fli couvre. -->
+      <div class="trip-heatmap" id="probe-heatmap" hidden>
+        <h2>Calendrier d'une compagnie</h2>
+        <p class="dim" style="font-size:0.78rem;margin:0 0 0.6rem">
+          Prix d'<strong>une seule compagnie</strong>, relevés progressivement :
+          chaque cellule porte la date de son propre relevé, visible au survol.
+          À ne pas lire comme le calendrier ci-dessus, qui compare tout le marché.
+        </p>
+        <label for="probe-heatmap-select" class="sr-only">Sonde à afficher</label>
+        <select id="probe-heatmap-select" name="probe-heatmap-select"></select>
+        <div id="probe-heatmap-grid"></div>
+      </div>
       <div class="trip-stats">
         <h2>Statistiques</h2>
         <div id="stats-content"></div>
@@ -244,6 +260,6 @@
 </main>
 
 
-<script src="/static/app.js?v=21"></script>
+<script src="/static/app.js?v=22"></script>
 </body>
 </html>

@@ -27,7 +27,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 import requests
@@ -54,12 +54,25 @@ AFKL_MAX_ATTEMPTS = 2
 # expirer un run de marché dont elle n'est qu'un supplément. Le curseur
 # est justement conçu pour reprendre au run suivant.
 PROBE_BUDGET_S = 150.0
+# Pause du seau quand le FOURNISSEUR refuse alors que notre compteur ne
+# l'était pas : assez long pour franchir une remise à zéro dont on
+# ignore l'heure, assez court pour ne pas condamner la journée.
+PROBE_BLOCK_H = 3
 
 _session: requests.Session | None = None
 
 
 class ProbeExhausted(Exception):
-    """Seau de quota vide. Inutile d'insister avant demain."""
+    """Notre propre seau est vide : on s'arrête, rien d'anormal."""
+
+
+class ProviderExhausted(ProbeExhausted):
+    """Le FOURNISSEUR refuse alors que notre compteur ne l'était pas.
+
+    Distinct du cas précédent : c'est le seul qui justifie de mettre le
+    seau en pause, parce qu'il révèle un décalage entre son compteur et
+    le nôtre (requête perdue, ou remise à zéro à une heure inconnue).
+    """
 
 
 class ProbeAuthError(Exception):
@@ -183,8 +196,8 @@ def _post(probe: Probe, key: str, body: dict[str, Any],
         if r.status_code == 403:
             blob = (r.text or "")[:200]
             if "Over Rate" in blob or "Over Limit" in blob:
-                raise ProbeExhausted(f"{probe.bucket}: quota épuisé "
-                                     "côté fournisseur")
+                raise ProviderExhausted(f"{probe.bucket}: quota épuisé "
+                                        "côté fournisseur")
             raise ProbeAuthError(f"clé {probe.key_env} refusée ({blob})")
 
         if r.status_code == 429:
@@ -398,7 +411,7 @@ def run_probe(cfg: Config, probe: Probe, trip: Trip,
     # afficher une panne à l'admin alors que la sonde avait bien travaillé.
     out: dict[str, Any] = {"rows": 0, "calls": 0, "failed": 0,
                            "exhausted": False, "error": None,
-                           "stopped": None}
+                           "stopped": None, "best": None}
     # Court-circuit en première ligne, comme search_duffel sans clé :
     # une sonde sans credential n'est pas une panne, c'est une sonde
     # désactivée.
@@ -463,6 +476,13 @@ def run_probe(cfg: Config, probe: Probe, trip: Trip,
                                 _body(cfg, probe, origin, destination,
                                       out_date, ret_date),
                                 tag=tag, take=take)
+            except ProviderExhausted as e:
+                out["exhausted"] = True
+                out["provider_exhausted"] = True
+                out["stopped"] = str(e)
+                complete = False
+                stop = True
+                break
             except ProbeExhausted as e:
                 out["exhausted"] = True
                 out["stopped"] = str(e)
@@ -493,12 +513,14 @@ def run_probe(cfg: Config, probe: Probe, trip: Trip,
         if complete and cell in rotation:
             last_rot = cell
 
-    # Le fournisseur nous dit que son quota est dépassé alors que notre
-    # compteur ne l'était pas : on ferme le seau pour la journée, sinon
-    # chaque période et chaque run suivant repart émettre un 403.
-    if out["exhausted"]:
+    # Seul le refus du FOURNISSEUR met le seau en pause : notre propre
+    # plafond se gère tout seul, et fermer la journée sur un 403 reçu
+    # après minuit — peut-être encore dans SA journée de la veille —
+    # condamnerait 24 h de relevés pour rien.
+    if out.get("provider_exhausted"):
+        until = (datetime.now() + timedelta(hours=PROBE_BLOCK_H)).isoformat()
         with db.conn() as c:
-            db.probe_quota_fill(c, probe.bucket, limit)
+            db.probe_quota_block(c, probe.bucket, limit, until=until)
 
     # L'échec dominant n'est pas l'exception, c'est la requête qui revient
     # vide : sans ça consecutive_failures restait à zéro et last_error
@@ -573,6 +595,42 @@ def _persist_best(payload: dict[str, Any], cfg: Config, probe: Probe,
             "captured_at": now,
         })
     out["rows"] += 1
+    # Meilleur prix du run, toutes cellules confondues : c'est la seule
+    # base d'alerte légitime pour une sonde, qui ne voit qu'une compagnie
+    # et ne peut donc rien dire du marché.
+    current = out.get("best")
+    if current is None or best_eur < current["price_eur"]:
+        out["best"] = {
+            "price_eur": best_eur,
+            "price_local": best.price,
+            "currency": best.currency,
+            "origin": best.origin,
+            "destination": best.destination,
+            "outbound_date": best.outbound_date,
+            "return_date": best.return_date,
+            "airlines": best.airlines,
+            "fare_family": best.fare_family,
+            "out_stops": best.out_stops,
+            "ret_stops": best.ret_stops,
+        }
+
+
+def product_hash(cfg: Config, probe: Probe) -> str:
+    """Empreinte du PRODUIT mesuré par la sonde.
+
+    Changer de compagnie, de cabine ou de nombre de passagers ne renomme
+    pas la sonde : sans cette empreinte, son « plus bas » resterait celui
+    d'un produit qu'elle ne mesure plus, et l'alerte basse ne se
+    redéclencherait jamais. Même principe que trip_config_hash côté
+    marché. Les fenêtres de dates en sont volontairement absentes : elles
+    sont couvertes par grid_hash, qui pilote la rotation.
+    """
+    payload = json.dumps([
+        probe.travel_host, probe.cabin, probe.passengers,
+        sorted(probe.origins), sorted(probe.destinations),
+        cfg.adults, sorted(cfg.children) if probe.passengers == "family" else [],
+    ], sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def probes_for(cfg: Config, trip: Trip) -> list[Probe]:

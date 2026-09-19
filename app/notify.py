@@ -324,3 +324,60 @@ def send_hotel_ntfy(cfg: Config, alert: dict) -> bool:
     except Exception as e:
         log.error(f"  ntfy hotel error: {e}")
         return False
+
+
+def send_probe_ntfy(cfg: Config, alert: dict) -> bool:
+    """Notification pour une sonde compagnie. Renvoie True si délivrée.
+
+    Distincte des alertes de marché, et le corps le dit explicitement :
+    une sonde ne voit QU'UNE compagnie. Annoncer « nouveau plus bas »
+    sans cette précision laisserait croire que le marché a bougé, alors
+    que seul Air France ou KLM a bougé sur une route et des dates
+    précises.
+    """
+    if not cfg.ntfy.topic:
+        return False
+    server = cfg.ntfy.server.rstrip("/")
+    url = f"{server}/{cfg.ntfy.topic}"
+    token = os.environ.get("NTFY_TOKEN")
+
+    carrier = {"AF": "Air France", "KL": "KLM"}.get(
+        alert.get("carrier", ""), alert.get("carrier", "compagnie"))
+    title = f"✈️ {alert['price']:.0f}€ — {carrier} {alert['origin']}→{alert['destination']}"
+    body_lines = [
+        f"**Nouveau plus bas {carrier}** — {alert['price']:.0f}€",
+        f"Prix d'UNE compagnie, pas du marché : à comparer au suivi habituel.",
+        "",
+        f"{alert['origin']} → {alert['destination']}",
+        f"{alert['outbound_date']} → {alert['return_date']}",
+    ]
+    prev = alert.get("previous_low")
+    if prev:
+        ecart = prev - alert["price"]
+        body_lines.append(f"Précédent bas de cette sonde : {prev:.0f}€ "
+                          f"(−{ecart:.0f}€)")
+    stops = alert.get("out_stops")
+    if stops is not None:
+        body_lines.append(
+            "Direct" if not stops else f"{stops} escale(s) à l'aller")
+    if alert.get("fare_family"):
+        body_lines.append(f"Tarif : {alert['fare_family']}")
+
+    headers = {
+        "Title": title.encode("utf-8"),
+        "Tags": "airplane,chart_with_downwards_trend",
+        "Priority": "default",
+        "Markdown": "yes",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        r = requests.post(url, data="\n".join(body_lines).encode("utf-8"),
+                          headers=headers, timeout=15)
+        if not r.ok:
+            log.info(f"  ntfy sonde HTTP {r.status_code}: {r.text[:200]}")
+        return r.ok
+    except Exception as e:
+        log.error(f"  ntfy sonde error: {e}")
+        return False

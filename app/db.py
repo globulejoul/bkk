@@ -180,6 +180,25 @@ MIGRATIONS: list[tuple[int, str]] = [
             PRIMARY KEY (probe, trip_name)
         );
     """),
+    # `blocked_until` : notre clé de jour est Europe/Paris, celle d'Air
+    # France est inconnue. Un 403 « Over Rate » reçu juste après minuit
+    # peut donc appartenir à SA journée de la veille — fermer la nôtre
+    # d'office y condamnait 24 h de relevés. On met le seau en pause.
+    #
+    # Le reste : état d'alerte par (sonde, période). Une sonde ne peut
+    # pas alerter sur l'état du marché — elle ne voit qu'une compagnie —
+    # mais elle peut alerter sur SON propre plus bas, ce qui demande une
+    # référence à elle, et une empreinte du produit mesuré pour la
+    # remettre à zéro quand la compagnie ou la cabine change.
+    (8, """
+        ALTER TABLE probe_quota  ADD COLUMN blocked_until TEXT;
+        ALTER TABLE probe_cursor ADD COLUMN lowest_price_eur REAL;
+        ALTER TABLE probe_cursor ADD COLUMN lowest_out TEXT;
+        ALTER TABLE probe_cursor ADD COLUMN lowest_ret TEXT;
+        ALTER TABLE probe_cursor ADD COLUMN lowest_seen_at TEXT;
+        ALTER TABLE probe_cursor ADD COLUMN last_alert_at TEXT;
+        ALTER TABLE probe_cursor ADD COLUMN product_hash TEXT;
+    """),
 ]
 
 
@@ -764,7 +783,8 @@ def insert_probe_check(c: sqlite3.Connection, row: dict[str, Any]) -> None:
 
 
 def probe_quota_take(c: sqlite3.Connection, bucket: str, limit: int,
-                     *, day: str | None = None) -> bool:
+                     *, day: str | None = None,
+                     now: str | None = None) -> bool:
     """Prend un jeton dans le seau du jour. False si le plafond est atteint.
 
     Le seau appartient au CREDENTIAL, pas à la sonde : vérifié en
@@ -778,11 +798,13 @@ def probe_quota_take(c: sqlite3.Connection, bucket: str, limit: int,
     if limit <= 0:
         return False
     d = day or date.today().isoformat()
+    n = now or datetime.now().isoformat()
     cur = c.execute(
-        "INSERT INTO probe_quota (bucket, day, used) VALUES (?, ?, 1) "
+        "INSERT INTO probe_quota (bucket, day, used) VALUES (:b, :d, 1) "
         "ON CONFLICT(bucket, day) DO UPDATE SET used = used + 1 "
-        "WHERE used < ?",
-        (bucket, d, limit),
+        "WHERE used < :q "
+        "  AND (blocked_until IS NULL OR blocked_until <= :n)",
+        {"b": bucket, "d": d, "q": limit, "n": n},
     )
     return bool(cur.rowcount)
 
@@ -855,6 +877,57 @@ def probe_quota_fill(c: sqlite3.Connection, bucket: str, limit: int,
         "INSERT INTO probe_quota (bucket, day, used) VALUES (?, ?, ?) "
         "ON CONFLICT(bucket, day) DO UPDATE SET used = MAX(used, ?)",
         (bucket, d, limit, limit),
+    )
+
+
+def probe_quota_block(c: sqlite3.Connection, bucket: str, limit: int,
+                      *, until: str, day: str | None = None) -> None:
+    """Met le seau en PAUSE parce que le fournisseur a refusé.
+
+    Pourquoi une pause et non la fermeture de la journée : notre clé de
+    jour est Europe/Paris, celle d'Air France est inconnue. Un 403 reçu
+    peu après minuit peut donc appartenir encore à SA journée de la
+    veille, et fermer la nôtre d'office y condamnerait 24 h de relevés
+    pour rien. La pause borne les dégâts à quelques heures et se répare
+    seule.
+
+    Exception : si notre propre compteur confirme qu'on a déjà consommé
+    la moitié du plafond, c'est un vrai épuisement — on ferme la journée.
+    """
+    d = day or date.today().isoformat()
+    used = probe_quota_used(c, bucket, day=d)
+    c.execute(
+        "INSERT INTO probe_quota (bucket, day, used, blocked_until) "
+        "VALUES (:b, :d, :u, :until) "
+        "ON CONFLICT(bucket, day) DO UPDATE SET "
+        "  blocked_until = :until, used = MAX(used, :u)",
+        {"b": bucket, "d": d, "until": until,
+         "u": limit if used >= limit // 2 else used},
+    )
+
+
+_VALID_PROBE_STATE_COLS = frozenset({
+    "lowest_price_eur", "lowest_out", "lowest_ret", "lowest_seen_at",
+    "last_alert_at", "product_hash",
+})
+
+
+def probe_state_set(c: sqlite3.Connection, probe: str, trip: str,
+                    **kwargs: Any) -> None:
+    """État d'alerte d'une sonde. Même table que le curseur : même clé."""
+    bad = set(kwargs) - _VALID_PROBE_STATE_COLS
+    if bad:
+        raise ValueError(f"Colonnes d'état de sonde invalides : {bad}")
+    if not kwargs:
+        return
+    cols = ["probe", "trip_name"] + list(kwargs)
+    placeholders = ", ".join(f":{k}" for k in cols)
+    sets = ", ".join(f"{k}=excluded.{k}" for k in kwargs)
+    c.execute(
+        f"INSERT INTO probe_cursor ({', '.join(cols)}) "
+        f"VALUES ({placeholders}) "
+        f"ON CONFLICT(probe, trip_name) DO UPDATE SET {sets}",
+        {**kwargs, "probe": probe, "trip_name": trip},
     )
 
 

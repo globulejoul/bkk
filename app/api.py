@@ -423,6 +423,23 @@ def get_trip_heatmap(name: str, days: int = Query(180, ge=1, le=DAYS_MAX)):
     return _heatmap_matrix(flat)
 
 
+@app.get("/api/trips/{name}/probes")
+def get_trip_probes(name: str):
+    """Sondes ayant des relevés pour cette période.
+
+    Volontairement PUBLIQUE et minimale, contrairement à /api/probes :
+    le tableau de bord n'est pas protégé, on n'y expose donc ni nom de
+    variable d'environnement, ni quota, ni message d'erreur technique —
+    seulement de quoi peupler un sélecteur.
+    """
+    with db.conn() as c:
+        rows = db.probe_summary(c, days=90)
+    return [{"probe": r["probe"], "carriers": r["carriers"],
+             "cells": r["cells"], "best_eur": r["best_eur"],
+             "last_capture": r["last_capture"]}
+            for r in rows if r["trip_name"] == name]
+
+
 @app.get("/api/trips/{name}/probe-heatmap")
 def get_trip_probe_heatmap(name: str, probe: str = Query(min_length=1),
                            days: int = Query(30, ge=1, le=DAYS_MAX)):
