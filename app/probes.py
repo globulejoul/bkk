@@ -527,8 +527,14 @@ def run_probe(cfg: Config, probe: Probe, trip: Trip,
     # était effacé alors que la sonde brûlait son quota pour rien.
     # `failed` compte des REQUÊTES (une par route et par cellule), pas
     # des cellules — le message doit dire la même chose que le compteur.
+    # Un arrêt NORMAL (seau en pause, budget de temps) n'est pas une
+    # panne : le compter comme telle faisait monter consecutive_failures
+    # et aurait fini par déclencher une fausse alerte « sonde en panne ».
+    # Et sans le test sur `failed`, le message annonçait « 0 requête(s)
+    # sans résultat » pour un run qui n'avait rien raté du tout.
     error = out["error"]
-    if error is None and out["calls"] and out["rows"] == 0:
+    if (error is None and out["stopped"] is None
+            and out["failed"] and out["rows"] == 0):
         error = f"{out['failed']} requête(s) sans résultat exploitable"
     elif error is None and out["failed"] > out["rows"]:
         # Dégradation partielle : on la rend visible sans la compter

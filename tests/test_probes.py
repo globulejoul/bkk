@@ -244,6 +244,10 @@ def test_cursor_does_not_skip_a_partial_cell() -> None:
             cur = db.probe_cursor_get(c, probe.name, trip.name)
         assert cur is not None, "le curseur doit être écrit"
         check("curseur non avancé sur cellule partielle", cur["last_out"], None)
+        # Un arrêt de quota est NORMAL : le compter comme une panne
+        # finissait par déclencher une fausse alerte « sonde en panne ».
+        check("pas compté comme panne", cur["consecutive_failures"], 0)
+        check("aucune erreur enregistrée", cur["last_error"], None)
 
 
 def test_provider_exhaustion_closes_the_bucket() -> None:
