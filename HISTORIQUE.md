@@ -149,7 +149,7 @@ L'utilisateur demande : VPS plus flexible que GitHub Actions ? Et de chercher su
 
 ### Pourquoi SQLite (pas PostgreSQL)
 - Volume : ~100 rows/jour × 365 jours = ~36k rows/an. SQLite gère ça les doigts dans le nez.
-- Backup = `cp prices.db prices.db.$(date)`.
+- Backup simple à faire. (Réserve découverte plus tard : la base est en mode WAL, un `cp` à chaud n'est pas fiable. La procédure correcte — `VACUUM INTO` / `.backup`, et suppression des `-wal`/`-shm` à la restauration — est dans le README.)
 - Pas de service supplémentaire à monitorer.
 
 ### Pourquoi APScheduler dans le même process que FastAPI
@@ -173,22 +173,150 @@ L'utilisateur demande : VPS plus flexible que GitHub Actions ? Et de chercher su
 
 ---
 
-## Améliorations qu'on a explicitement choisi de NE PAS faire (à ce stade)
+## Itération 7 — v5 : fli + Duffel, abandon de Tequila et du VPN (mai 2026)
 
-L'utilisateur a vu ces options dans un multi-select et **ne les a pas cochées**. À ne refaire que sur redemande :
+La v4 n'a pas survécu à sa première mise en service. Trois constats, dans l'ordre :
 
-- ❌ Anomaly detection percentile-based
-- ❌ Round-trip vs 2 one-ways comparison
-- ❌ Filtre horaire de vol
-- ❌ Seats.aero (vols en miles)
+### Tequila abandonné
 
-Ces items restent dans `CLAUDE.md` section "Améliorations identifiées non implémentées" pour mémoire.
+L'API Kiwi ne renvoie que le catalogue Kiwi (cf. Q1 de l'itération 4), avec ses
+marges et son virtual interlining. Les prix ne correspondaient pas à ce que
+l'utilisateur voyait ailleurs. Remplacé par deux sources complémentaires :
+
+- **fli** (`b47df92`) — API Google Flights reverse-engineered, gratuite, sans clé.
+- **Duffel** (`88c94cc`) — tarifs compagnies en direct, 300+ transporteurs.
+
+**Piège de nommage, à retenir** : le paquet s'installe sous le nom PyPI
+`flights`, s'importe sous le nom `fli`, et vit sur
+`github.com/punitarani/fli` (`d2698e5` corrige précisément ce point). Les trois
+noms sont différents ; `pip install fli` installe autre chose.
+
+### fast-flights abandonné
+
+Avant fli, on est passé par fast-flights pendant quelques heures : branche v3
+au parseur cassé, puis branche v2, puis `fetch_mode=local`, puis suppression du
+paramètre (`516ee4d`, `7732c0f`, `8edc350`). Trop instable pour être la source
+principale. fli fait la même chose sans le détour par Playwright.
+
+### VPN abandonné
+
+Gluetun/NordVPN étaient là pour comparer le marché thaï au marché français.
+Deux raisons de les retirer : ni fli ni Duffel ne se comportent comme une page
+Google grand public soumise à la geo-discrimination, et le déploiement a
+finalement quitté le home server pour un **VPS Hostinger mutualisé** derrière
+Caddy — un sidecar VPN sur une machine partagée n'a plus la même innocuité.
+`319cf14` acte la disparition de Tequila et de Gluetun dans la doc.
+
+### Grille de dates exhaustive
+
+Tequila couvrait les 49 combinaisons aller × retour en un appel. Duffel, non :
+il faut une requête par combinaison. On l'a assumé (`14f5fc5`) parce que c'est
+ce qui permet la **heatmap** — voir quelles dates précises sont les moins
+chères, pas seulement le prix plancher de la période. Conséquence : un run
+devient long et bruyant côté quota, d'où le rate limiting adaptatif lisant les
+en-têtes de quota (`899ccd0`).
+
+### Fonctionnalités de la même vague (`f9bbfa5`)
+
+Heatmap, tendance, **score achat 0-100**, **flash mode** (checks toutes les
+5 min pendant 48 h quand le seuil est atteint), **open-jaw**, et
+**l'alerte percentile** et la **comparaison A/R vs 2 allers simples** — les deux
+items listés plus bas comme « non retenus » ont donc finalement été
+implémentés.
+
+---
+
+## Itération 8 — Page Admin et exploitabilité (mai 2026)
+
+`0e1e5a8` et la série qui suit : page Admin pour éditer la configuration depuis
+le dashboard (aéroports, voyageurs, périodes, seuils, durée de vol max, toggle
+on/off par période), watchdog des runs bloqués, notifications de hausse.
+
+**Conséquence importante** : `config.yml` est devenu un fichier *écrit par
+l'application*. Il a donc été **retiré du suivi git** (`9830652`) au profit de
+`config.example.yml`. Un `git pull` ne doit jamais écraser la configuration du
+serveur. Le montage `:ro` du volume a été retiré en même temps (`9ee038b`).
+
+---
+
+## Itération 9 — Suivi hôtel via Playwright (mai 2026)
+
+`3a64d3a` puis `9302827`. Google Hotels n'a pas d'API : Chromium headless via
+Playwright, un scrape par hôtel. Première version par `entity_id`, réécrite
+presque aussitôt en **recherche par nom** — l'identifiant d'entité était fragile
+et opaque. Le champ `entity_id` subsiste dans la configuration mais n'est plus
+utilisé.
+
+---
+
+## Itération 10 — Audit, puis coupure de Duffel (septembre 2026)
+
+Un audit complet du projet (septembre 2026) a produit une centaine de constats,
+dont le fait que `CLAUDE.md`, `.env.example` et `config.example.yml` décrivaient
+encore la stack v4 disparue.
+
+**Duffel coupé le 12 septembre 2026.** Motif : la tarification « excess search »
+facture 0,005 $ par recherche au-delà d'un ratio de 1 500 recherches par
+réservation — et ce compte ne réserve jamais rien. Avec une grille de dates
+exhaustive à chaque run, le dépassement est structurel. La clé a été commentée
+dans `/opt/bkk/.env` ; le code court-circuite (`search_duffel()` renvoie une
+liste vide sans clé) et fli reste seule source de vols.
+
+**À ne pas refaire sans décision explicite** : réactiver la clé « pour voir ».
+Le coût n'est pas nul et personne ne surveille la facture.
+
+---
+
+## Itération 11 — Réparation du suivi hôtel (19 septembre 2026)
+
+Le scraper hôtel renvoyait des prix qui ne correspondaient ni aux bonnes dates
+ni au bon périmètre. Trois causes, trois correctifs (`22b1ac5`, `da75561`,
+`5e40d7f`) :
+
+1. **Google ignore `checkin`/`checkout` en clair dans l'URL** et répond avec ses
+   dates par défaut. Les dates doivent voyager dans le paramètre `ts`, un
+   protobuf encodé en base64 — d'où `hotels.build_ts()`.
+2. **Le montant affiché est ambigu** (par nuit ou pour le séjour, taxes ou non).
+   On ne retient plus que le prix lu dans le libellé d'accessibilité
+   « X € pour les dates …, <nom de l'hôtel> », multiplié par le nombre de nuits
+   quand Google affiche un prix par nuit. En son absence, le scrape **échoue**
+   au lieu d'enregistrer une valeur douteuse — un chiffre faux dans un
+   historique de prix est pire qu'un trou.
+3. **La recherche par nom seul pouvait tomber sur un autre établissement.**
+   Navigation en deux temps : recherche sans dates pour récupérer le handle
+   d'entité `qs` de la fiche, puis rechargement de cette fiche avec les dates.
+
+Les échecs sont désormais tracés (`hotel_state.last_error`,
+`consecutive_failures`) : la surveillance ne peut plus mourir en silence.
+
+Résultat vérifié en production : **240 € pour 2 nuits** au Chatrium Riverside,
+13 → 15 février 2027.
+
+---
+
+## Améliorations envisagées et leur statut
+
+Ces options avaient été présentées à l'utilisateur en multi-select à
+l'itération 6 et non cochées à ce moment-là. Deux ont finalement été
+implémentées depuis :
+
+| Option | Statut |
+|---|---|
+| Anomaly detection percentile-based | **Implémenté** (`f9bbfa5`) — alerte quand le prix est dans le 10e percentile historique |
+| Round-trip vs 2 one-ways | **Implémenté** (`f9bbfa5`) — `_compare_oneway()`, déclenché sur alerte basse uniquement |
+| Filtre horaire de vol | Non retenu |
+| Seats.aero (vols en miles) | Non retenu |
 
 ---
 
 ## Choses qui ont été essayées et abandonnées
 
-- **NordVPN sur GitHub Actions** (en v3) : envisagé, jugé inutilement complexe (openvpn + auth dans le workflow), abandonné au profit de SerpAPI `gl=th`. Puis ré-introduit en v4 quand on est passé sur Docker home server (Gluetun rend ça trivial).
+- **Kiwi Tequila** (v1 → v3, source primaire) : abandonné en v5, ne renvoie que le catalogue Kiwi.
+- **SerpAPI** (v2) : remplacé par du gratuit, jamais revenu.
+- **fast-flights** (v4) : parseur instable, remplacé par fli après quelques heures.
+- **NordVPN sur GitHub Actions** (v3) : jugé inutilement complexe, abandonné au profit de SerpAPI `gl=th`. Ré-introduit en v4 via Gluetun sur le home server, puis **définitivement retiré en v5** (sources non géo-discriminantes + VPS mutualisé).
+- **GitHub Actions comme runtime** (v1 → v3) : remplacé par Docker, d'abord home server puis VPS.
+- **`entity_id` Google Hotels** : première approche du scraper hôtel, remplacée par la recherche par nom puis par la navigation en deux temps via `qs`.
 - **Création d'un compte Telegram pour les alertes** : remplacé par ntfy dès la v2 (préférence utilisateur).
 - **Email SMTP via Gmail** : envisagé, abandonné car ntfy déjà en place.
 

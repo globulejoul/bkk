@@ -1,6 +1,9 @@
 # ═══════════════════════════════════════════════════════════════
-# Flight Watcher v4 — Configuration
+# Bangkok Watch — Configuration (modèle)
 # Vacances Zone A (Lyon) 2026-2027 — dates officielles
+#
+# Copier en config.yml. config.yml est gitignored : il est écrit par la page
+# Admin et ne doit jamais être écrasé par un déploiement.
 # ═══════════════════════════════════════════════════════════════
 
 # Aéroports de départ
@@ -20,21 +23,32 @@ max_fly_duration_hours: 18
 # Cron pour le scheduler interne (timezone Europe/Paris)
 # "0 7,19 * * *" = 2x par jour à 7h et 19h
 # "0 */6 * * *" = toutes les 6 heures
-# "0 * * * *"   = toutes les heures (max ~700 calls/mois Tequila)
+# "0 * * * *"   = toutes les heures
+# Attention : chaque run parcourt origines × destinations × dates aller × dates
+# retour côté Duffel, et lance un Chromium par hôtel. Plus le cron est fréquent,
+# plus les runs risquent de se chevaucher.
 schedule_cron: "0 */6 * * *"
 
 rolling_window_days: 14
 rise_threshold_pct: 0.10  # alerte hausse si +10% vs bas 7 derniers jours
 
 # ─── ntfy ──────────────────────────────────────────────────────
+# LE TOPIC EST UN SECRET. Sur ntfy.sh, un topic non réservé est ouvert en
+# lecture ET en écriture à quiconque connaît son nom : il peut lire toutes tes
+# alertes en temps réel et t'envoyer de fausses notifications (y compris avec
+# un lien cliquable vers l'URL de son choix). NTFY_TOKEN ne protège que
+# l'émission, pas la lecture.
+# Génère un nom long et aléatoire, par exemple :  openssl rand -hex 16
+# Ne le committe jamais, et ne le partage pas avec un autre usage.
 ntfy:
   server: https://ntfy.sh
-  topic: frigate-maison-jfourt
+  topic: CHANGE-MOI-chaine-aleatoire
 
-# ─── Hôtels à surveiller (Google Hotels entity ID) ────────────
+# ─── Hôtels à surveiller (Google Hotels) ──────────────────────
+# La recherche se fait par `name`, tel qu'il apparaît sur Google Hotels.
+# Le champ `entity_id` est encore lu par le code mais n'est plus utilisé.
 hotels:
   - name: "Chatrium Riverside Bangkok"
-    entity_id: "CgsI4tWK2cf7nNfzARAB"
     checkin: "2026-10-16"
     checkout: "2026-10-19"
     price_threshold: 500  # EUR total pour le séjour

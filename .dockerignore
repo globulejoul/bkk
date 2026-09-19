@@ -1,0 +1,22 @@
+# Garde-fou : le Dockerfile ne copie aujourd'hui que requirements.txt, app/ et static/,
+# mais si un COPY . /app apparait un jour, ni les secrets ni la base ne doivent partir
+# dans l'image. Stabilise aussi le cache de build.
+.git
+.gitignore
+.github/
+.claude/
+.env
+.env.*
+data/
+config.yml
+*.md
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.db
+*.db-wal
+*.db-shm
+tests/

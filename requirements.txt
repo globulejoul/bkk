@@ -1,7 +1,14 @@
-requests>=2.31
-PyYAML>=6.0
-fastapi>=0.110
-uvicorn[standard]>=0.27
-apscheduler>=3.10
-flights>=0.9.0
-playwright>=1.40
+# Versions figées sur celles tournant en production (relevées par pip
+# freeze dans le conteneur). Sans épinglage, un rebuild peut embarquer
+# une version majeure différente sans aucun changement de code.
+# Pour mettre à jour : relever la version voulue, rebuilder SANS cache,
+# et vérifier un run complet avant de déployer.
+requests==2.34.2
+PyYAML==6.0.3
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+apscheduler==3.11.3
+# Paquet PyPI « flights », module importé « fli », dépôt punitarani/fli.
+# Projet jeune et reverse-engineered : ne pas laisser flotter.
+flights==0.9.0
+playwright==1.63.0

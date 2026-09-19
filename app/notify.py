@@ -8,15 +8,25 @@ import requests
 from app.config import Config
 
 
-def send_ntfy(cfg: Config, alert: dict) -> None:
+def send_ntfy(cfg: Config, alert: dict) -> bool:
+    """Renvoie True si ntfy a accepté la notification."""
     if not cfg.ntfy.topic:
-        return
+        return False
     server = cfg.ntfy.server.rstrip("/")
     url = f"{server}/{cfg.ntfy.topic}"
     token = os.environ.get("NTFY_TOKEN")
 
     if alert["kind"] == "new_low":
-        title = f"📉 {alert['price']:.0f}€ — {alert['trip']}"
+        # Ce payload couvre aussi seuil et percentile : la flèche baissière
+        # sur un prix remonté annonçait une baisse qui n'existait pas.
+        # Le titre doit dire la même chose que le corps (_body_new_low).
+        prev_low = alert.get("previous_low")
+        is_new_low = prev_low is None or alert["price"] < prev_low - 0.5
+        if alert.get("hit_threshold"):
+            icon = "🎯"
+        else:
+            icon = "📉" if is_new_low else "📊"
+        title = f"{icon} {alert['price']:.0f}€ — {alert['trip']}"
         tags = "airplane,chart_with_downwards_trend"
         priority = "high" if alert.get("hit_threshold") else "default"
         body = _body_new_low(alert)
@@ -26,7 +36,7 @@ def send_ntfy(cfg: Config, alert: dict) -> None:
         priority = "default"
         body = _body_rise(alert)
     else:
-        return
+        return False
 
     headers = {
         "Title": title.encode("utf-8"),
@@ -40,25 +50,45 @@ def send_ntfy(cfg: Config, alert: dict) -> None:
         headers["Authorization"] = f"Bearer {token}"
 
     try:
-        requests.post(url, data=body.encode("utf-8"),
-                      headers=headers, timeout=15)
+        r = requests.post(url, data=body.encode("utf-8"),
+                          headers=headers, timeout=15)
+        if not r.ok:
+            print(f"  ntfy HTTP {r.status_code}: {r.text[:200]}")
+        return r.ok
     except Exception as e:
         print(f"  ntfy error: {e}")
+        return False
 
 
 def _body_new_low(a: dict) -> str:
     pct = a.get("percentile")
     prev = a.get("previous_low")
 
+    # Le payload kind='new_low' est aussi émis sur seuil ou percentile
+    # sans nouveau record : même règle que le watcher (marge 0,50 €) pour
+    # savoir si le prix a réellement battu le plus bas connu.
+    price = a["price"]
+    is_new_low = prev is None or price < prev - 0.5
+
     # Header line
     if a.get("hit_threshold"):
         tag = "🎯 SEUIL ATTEINT"
+    elif is_new_low:
+        tag = "📉 NOUVEAU PRIX BAS"
     elif pct is not None and pct <= 10:
         tag = f"📊 PRIX RARE ({pct:.0f}e percentile)"
     else:
-        tag = "📉 NOUVEAU PRIX BAS"
+        tag = "📉 PRIX BAS"
 
-    delta = f" (↓{prev - a['price']:.0f}€)" if prev else ""
+    # Sans test de signe, une alerte seuil sur un prix remonté affichait
+    # « ↓-40€ », soit l'inverse de ce qui s'était passé.
+    if prev is None:
+        delta = ""
+    elif is_new_low:
+        delta = f" (↓{prev - price:.0f}€)"
+    else:
+        delta = f" (+{price - prev:.0f}€ vs plus bas {prev:.0f}€)"
+
     lines = [
         f"**{tag}** — {a['price']:.0f}€{delta}",
         f"{a['airlines']} • {a['origin']} → {a['destination']}",
@@ -95,27 +125,6 @@ def _body_new_low(a: dict) -> str:
         else:
             label = "Pas le bon moment"
         lines.append(f"Score achat: {buy_score}/100 — {label}")
-
-    # Cross-checks
-    cross = a.get("cross_checks") or []
-    if cross:
-        lines.append("")
-        lines.append("**Comparaison marchés:**")
-        baseline = a["price"]
-        for cc in cross:
-            eur = cc.get("eur_equiv")
-            if eur is None:
-                lines.append(f"• {cc['label']}: {cc['price']:.0f} {cc['currency']} "
-                             "(FX indispo)")
-            else:
-                diff = (eur / baseline - 1) * 100
-                sign = "+" if diff >= 0 else ""
-                if cc["currency"] == "EUR":
-                    p = f"{cc['price']:.0f}€"
-                else:
-                    p = f"{cc['price']:.0f} {cc['currency']} ≈ {eur:.0f}€"
-                lines.append(f"• {cc['label']}: {p} ({sign}{diff:.1f}%) "
-                             f"{cc.get('airlines', '')}")
 
     # One-way comparison
     ow = a.get("oneway_comparison")

@@ -1,12 +1,19 @@
 """Main check loop: queries sources, detects alerts, persists, notifies."""
 from __future__ import annotations
 
+import sqlite3
 import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from app import db, fx, hotels, notify, sources
-from app.config import Config, HotelWatch
+from app.config import Config, HotelWatch, Trip
+
+
+# Même fenêtre que le dashboard (api.py appelle price_trend days=7) :
+# la notification annonçait « Tendance 7j » en calculant sur 14 jours,
+# d'où deux recommandations opposées pour le même prix.
+TREND_DAYS = 7
 
 
 # ── Trend & buy-score helpers ───────────────────────────────────
@@ -49,7 +56,7 @@ def _calc_trend(prices_7d: list[tuple[str, float]]) -> dict[str, Any]:
             "recommendation": recommendation}
 
 
-def _calc_buy_score(price_eur: float, trip, cfg: Config,
+def _calc_buy_score(price_eur: float, trip: Trip, cfg: Config,
                     rates: dict[str, float],
                     pct: float | None,
                     trend: dict[str, Any]) -> int:
@@ -109,7 +116,16 @@ def run_once(cfg: Config) -> dict[str, Any]:
     with db.conn() as c:
         run_id = db.start_run(c)
 
-    summary = {"trips_checked": 0, "alerts_generated": 0, "errors": []}
+    today = date.today().isoformat()
+    # Même borne que valid_combos : sinon une période dont la fenêtre
+    # aller se termine aujourd'hui passait le test d'expiration puis
+    # ressortait sans aucune date, comptée comme « aucune donnée ».
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    summary: dict[str, Any] = {
+        "trips_checked": 0, "alerts_generated": 0,
+        "errors": [], "expired": [], "status": "ok",
+    }
+    trips_active = 0
     try:
         rates = fx.fetch_rates(cfg.currency, ["THB"])
 
@@ -117,10 +133,22 @@ def run_once(cfg: Config) -> dict[str, Any]:
             if not trip.enabled:
                 print(f"  ⏸ {trip.name}: désactivé, skip")
                 continue
+            # Une fenêtre aller entièrement passée n'est plus réservable :
+            # chaque combo partait quand même vers Duffel (422 + quota).
+            if trip.outbound_window[1] < tomorrow:
+                print(f"  🗓 {trip.name}: période échue, skip")
+                summary["expired"].append(trip.name)
+                continue
+            trips_active += 1
             try:
-                trip_alerts = _check_trip(cfg, trip, rates)
+                nb_rows, trip_alerts = _check_trip(cfg, trip, rates)
                 summary["alerts_generated"] += trip_alerts
-                summary["trips_checked"] += 1
+                if nb_rows:
+                    summary["trips_checked"] += 1
+                else:
+                    # Sortie silencieuse (aucun résultat / aucun prix
+                    # convertible) : elle ne doit pas passer pour un run sain.
+                    summary["errors"].append(f"{trip.name}: aucune donnée")
             except Exception as e:
                 summary["errors"].append(f"{trip.name}: {e}")
                 print(f"  ❌ {trip.name}: {e}")
@@ -133,16 +161,39 @@ def run_once(cfg: Config) -> dict[str, Any]:
             if not hotel.checkin or not hotel.checkout:
                 print(f"  ⚠ Hotel {hotel.name}: dates manquantes, skip")
                 continue
+            # Un séjour dont l'arrivée est passée ne peut plus être tarifé :
+            # Google renvoyait alors un prix pour d'autres dates.
+            if hotel.checkin < today:
+                print(f"  🗓 Hotel {hotel.name}: séjour échu, skip")
+                summary["expired"].append(f"Hotel {hotel.name}")
+                continue
             try:
                 _check_hotel(cfg, hotel, rates)
             except Exception as e:
                 summary["errors"].append(f"Hotel {hotel.name}: {e}")
                 print(f"  ❌ Hotel {hotel.name}: {e}")
 
+        if trips_active and summary["trips_checked"] == 0:
+            summary["status"] = "error"
+        elif summary["errors"]:
+            summary["status"] = "partial"
+        error_txt = "; ".join(summary["errors"])[:1000] or None
+
         with db.conn() as c:
-            db.finish_run(c, run_id, "ok", summary["trips_checked"],
-                          summary["alerts_generated"], None)
+            db.finish_run(c, run_id, summary["status"],
+                          summary["trips_checked"],
+                          summary["alerts_generated"], error_txt)
+
+        # Panne totale : sans cette alerte, une source cassée donnait des
+        # runs « ✓ 0 alertes » pendant des semaines. On ne notifie qu'au
+        # PASSAGE en panne : sinon une panne durable pousse une alerte
+        # identique à chaque run, 4 fois par jour.
+        if summary["status"] == "error" and not _previous_run_failed(run_id):
+            notify.send_ops_ntfy(
+                cfg, "✈️ Aucune donnée collectée",
+                error_txt or "Toutes les périodes surveillées ont échoué.")
     except Exception as e:
+        summary["status"] = "error"
         with db.conn() as c:
             db.finish_run(c, run_id, "error", summary["trips_checked"],
                           summary["alerts_generated"], str(e))
@@ -151,17 +202,71 @@ def run_once(cfg: Config) -> dict[str, Any]:
     return summary
 
 
-def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
-    """Check one trip. Returns alert count."""
+def _previous_run_failed(run_id: int) -> bool:
+    """Le run précédent était-il déjà en échec ?"""
+    with db.conn() as c:
+        row = c.execute(
+            "SELECT status FROM run_log WHERE id < ? AND status != 'running' "
+            "ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
+    return bool(row) and row[0] in ("error", "timeout")
+
+
+def valid_combos(trip: Trip) -> dict[str, list[str]]:
+    """Combinaisons {date aller: [dates retour]} encore réservables et
+    conformes aux contraintes de durée du séjour.
+
+    Partagée avec le flash mode : tant que chaque chemin recalculait ses
+    dates de son côté, le flash interrogeait des départs échus ou des
+    durées que la période exclut.
+    """
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    out_dates = [d for d in sources.date_range(trip.outbound_window)
+                 if d >= tomorrow]
+    ret_dates = [d for d in sources.date_range(trip.return_window)
+                 if d >= tomorrow]
+    if not out_dates or not ret_dates:
+        return {}
+
+    min_nights = trip.min_nights if trip.min_nights is not None else 1
+    max_nights = trip.max_nights if trip.max_nights is not None else 10 ** 6
+    combos: dict[str, list[str]] = {}
+    for out_d in out_dates:
+        out_day = date.fromisoformat(out_d)
+        valid = [r for r in ret_dates
+                 if min_nights <= (date.fromisoformat(r) - out_day).days
+                 <= max_nights]
+        if valid:
+            combos[out_d] = valid
+    return combos
+
+
+def mid_combo(trip: Trip) -> tuple[str, str] | None:
+    """Couple (aller, retour) médian parmi les combinaisons valides."""
+    combos = valid_combos(trip)
+    if not combos:
+        return None
+    out_mid = list(combos)[len(combos) // 2]
+    rets = combos[out_mid]
+    return out_mid, rets[len(rets) // 2]
+
+
+def _check_trip(cfg: Config, trip: Trip,
+                rates: dict[str, float]) -> tuple[int, int]:
+    """Check one trip. Returns (lignes persistées, alertes envoyées)."""
     today = date.today().isoformat()
     now = datetime.now().isoformat()
 
-    # Toutes les dates des fenêtres
-    out_dates = sources.date_range(trip.outbound_window)
-    ret_dates = sources.date_range(trip.return_window)
-    out_mid = sources.mid_date(trip.outbound_window)
-    ret_mid = sources.mid_date(trip.return_window)
-    nb_combos = len(out_dates) * len(ret_dates)
+    # Dates échues écartées et contraintes de durée appliquées : sans
+    # elles un A/R de 0 ou 40 nuits pouvait devenir le « nouveau plus
+    # bas » pour un séjour qui n'est pas celui qu'on surveille.
+    combos = valid_combos(trip)
+    if not combos:
+        print(f"  ⚠ {trip.name}: aucune combinaison réservable")
+        return 0, 0
+    out_dates = list(combos)
+    ret_dates = sorted({r for rets in combos.values() for r in rets})
+    nb_combos = sum(len(v) for v in combos.values())
+    out_mid, ret_mid = mid_combo(trip)
 
     # 1) Google Flights via fli (date médiane uniquement, scraping)
     print(f"\n→ {trip.name}: fli {out_mid}/{ret_mid} + Duffel {nb_combos} combos dates")
@@ -172,20 +277,33 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
     )
     print(f"  Google Flights: {len(ff_results)} résultats (date médiane)")
 
-    # 2) Duffel : toutes les combos dates × toutes les paires
-    duffel_results = sources.search_duffel(
-        origins=cfg.origins, destinations=cfg.destinations,
-        outbound_dates=out_dates, return_dates=ret_dates,
-        adults=cfg.adults, currency=cfg.currency,
-        max_fly_h=cfg.max_fly_duration_hours,
-    )
+    # 2) Duffel. search_duffel croise les deux listes de dates : quand la
+    # contrainte de durée écarte des combos, on l'appelle une fois par
+    # date aller avec ses seuls retours valides. Sinon un seul appel, pour
+    # ne pas réinitialiser son suivi de quota sans raison.
+    duffel_results: list[sources.FlightResult] = []
+    if nb_combos == len(out_dates) * len(ret_dates):
+        duffel_results = sources.search_duffel(
+            origins=cfg.origins, destinations=cfg.destinations,
+            outbound_dates=out_dates, return_dates=ret_dates,
+            adults=cfg.adults, currency=cfg.currency,
+            max_fly_h=cfg.max_fly_duration_hours,
+        )
+    else:
+        for out_d, rets in combos.items():
+            duffel_results += sources.search_duffel(
+                origins=cfg.origins, destinations=cfg.destinations,
+                outbound_dates=[out_d], return_dates=rets,
+                adults=cfg.adults, currency=cfg.currency,
+                max_fly_h=cfg.max_fly_duration_hours,
+            )
     print(f"  Duffel: {len(duffel_results)} résultats ({nb_combos} combos dates)")
 
     # 3) Fusionner et garder le best par paire (origin, dest)
     all_results = ff_results + duffel_results
     if not all_results:
         print(f"  ⚠ Aucun résultat pour {trip.name}")
-        return 0
+        return 0, 0
 
     by_pair: dict[tuple[str, str], sources.FlightResult] = {}
     for r in all_results:
@@ -199,7 +317,7 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
 
     if not by_pair:
         print(f"  ⚠ Aucun prix convertible pour {trip.name}")
-        return 0
+        return 0, 0
 
     # Best overall
     best = min(by_pair.values(), key=lambda r: _to_eur(r, rates) or 1e9)
@@ -227,8 +345,13 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
         state = db.get_state(c, trip.name) or {}
         prev_low = state.get("lowest_price_eur")
         rolling = state.get("rolling") or []
+        # Plusieurs runs par jour : on garde le minimum de la journée.
+        # Sinon un creux vu le matin disparaissait dès le run suivant et
+        # la hausse +10 % ne se déclenchait jamais.
+        same_day = [x[1] for x in rolling
+                    if x[0] == today and x[1] is not None]
         rolling = [x for x in rolling if x[0] != today]
-        rolling.append([today, best_price_eur])
+        rolling.append([today, min([best_price_eur] + same_day)])
         cutoff = (date.today()
                   - timedelta(days=cfg.rolling_window_days)).isoformat()
         rolling = [x for x in rolling if x[0] >= cutoff]
@@ -268,16 +391,17 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
 
     alert_count = 0
 
-    # 6) Percentile rank
-    pct = None
+    # 6) Percentile rank, tendance et anti-doublon « hausse »
     with db.conn() as c:
         pct = db.percentile_rank(c, trip.name, best_price_eur)
+        # 6b) Même source que le dashboard, sinon les deux affichaient des
+        # recommandations opposées pour le même prix.
+        trend = _calc_trend(db.price_trend(c, trip.name, days=TREND_DAYS))
+        rise_already_sent = _rise_alert_recent(c, trip.name)
     if pct is not None:
         print(f"  Percentile: {pct:.0f}e (0=cheapest)")
-
-    # 6b) Trend calculation from rolling data
-    trend = _calc_trend(rolling)
-    print(f"  Tendance 7j: {trend['direction']} ({trend['change_pct']:+.1f}%)")
+    print(f"  Tendance {TREND_DAYS}j: {trend['direction']} "
+          f"({trend['change_pct']:+.1f}%)")
 
     # 6c) Buy score
     buy_score = _calc_buy_score(best_price_eur, trip, cfg, rates, pct, trend)
@@ -286,78 +410,77 @@ def _check_trip(cfg: Config, trip, rates: dict[str, float]) -> int:
     # Alerte percentile : prix dans le 10e percentile historique
     in_low_percentile = pct is not None and pct <= 10.0
 
-    # 7) On alerts: cross-check VPN + comparaison RT vs 2 one-ways + open-jaw
-    should_alert = new_low or hit_threshold or rise or in_low_percentile
-    if should_alert:
-        cross_checks = _build_cross_checks(cfg, best, rates)
+    # 7) Alertes. Les comparaisons RT vs 2 OW et open-jaw coûtent ~10
+    # requêtes et 15 s de pauses : elles ne servent qu'au message « bas »,
+    # le payload « hausse » ne les contient pas.
+    if new_low or hit_threshold or in_low_percentile:
         ow_comparison = _compare_oneway(cfg, best, rates)
         oj_comparison = _compare_openjaw(cfg, best, rates)
 
+        kind = "new_low"
+        payload = {
+            "kind": kind, "trip": trip.name,
+            "price": best_price_eur,
+            "previous_low": prev_low,
+            "hit_threshold": hit_threshold,
+            "percentile": pct,
+            "trend": trend,
+            "buy_score": buy_score,
+            "origin": best.origin, "destination": best.destination,
+            "outbound_date": best.outbound_date,
+            "return_date": best.return_date,
+            "out_h": best.out_h, "ret_h": best.ret_h,
+            "out_stops": best.out_stops, "ret_stops": best.ret_stops,
+            "airlines": best.airlines,
+            "booking_url": best.booking_url,
+            "oneway_comparison": ow_comparison,
+            "openjaw_comparison": oj_comparison,
+        }
+        notify.send_ntfy(cfg, payload)
         with db.conn() as c:
-            for cc in cross_checks:
-                db.insert_check(c, {
-                    "check_date": today, "trip_name": trip.name,
-                    "source": cc["source"],
-                    "origin": best.origin, "destination": best.destination,
-                    "price_local": cc["price"], "currency": cc["currency"],
-                    "price_eur": cc.get("eur_equiv"),
-                    "outbound_date": best.outbound_date,
-                    "return_date": best.return_date,
-                    "out_h": best.out_h, "ret_h": best.ret_h,
-                    "out_stops": best.out_stops, "ret_stops": best.ret_stops,
-                    "airlines": cc.get("airlines", ""),
-                    "booking_url": "", "captured_at": now,
-                })
+            db.log_alert(c, trip.name, kind, best_price_eur, payload)
+        alert_count += 1
+        print(f"  ⚠️  {kind} alert sent ({best_price_eur:.0f}€)")
+    elif rise and rise_already_sent:
+        print("  📈 hausse déjà notifiée il y a moins de 24 h, on se tait")
+    elif rise:
+        payload = {
+            "kind": "rise", "trip": trip.name,
+            "price": best_price_eur, **rise,
+            "percentile": pct,
+            "trend": trend,
+            "buy_score": buy_score,
+            "origin": best.origin, "destination": best.destination,
+            "outbound_date": best.outbound_date,
+            "return_date": best.return_date,
+            "out_h": best.out_h, "ret_h": best.ret_h,
+            "out_stops": best.out_stops, "ret_stops": best.ret_stops,
+            "airlines": best.airlines,
+            "booking_url": best.booking_url,
+        }
+        notify.send_ntfy(cfg, payload)
+        with db.conn() as c:
+            db.log_alert(c, trip.name, "rise", best_price_eur, payload)
+        alert_count += 1
+        print(f"  📈 rise alert sent ({best_price_eur:.0f}€)")
 
-        # Determine alert kind
-        if new_low or hit_threshold or in_low_percentile:
-            kind = "new_low"
-            payload = {
-                "kind": kind, "trip": trip.name,
-                "price": best_price_eur,
-                "previous_low": prev_low,
-                "hit_threshold": hit_threshold,
-                "percentile": pct,
-                "trend": trend,
-                "buy_score": buy_score,
-                "origin": best.origin, "destination": best.destination,
-                "outbound_date": best.outbound_date,
-                "return_date": best.return_date,
-                "out_h": best.out_h, "ret_h": best.ret_h,
-                "out_stops": best.out_stops, "ret_stops": best.ret_stops,
-                "airlines": best.airlines,
-                "booking_url": best.booking_url,
-                "cross_checks": cross_checks,
-                "oneway_comparison": ow_comparison,
-                "openjaw_comparison": oj_comparison,
-            }
-            notify.send_ntfy(cfg, payload)
-            with db.conn() as c:
-                db.log_alert(c, trip.name, kind, best_price_eur, payload)
-            alert_count += 1
-            print(f"  ⚠️  {kind} alert sent ({best_price_eur:.0f}€)")
-        elif rise:
-            payload = {
-                "kind": "rise", "trip": trip.name,
-                "price": best_price_eur, **rise,
-                "percentile": pct,
-                "trend": trend,
-                "buy_score": buy_score,
-                "origin": best.origin, "destination": best.destination,
-                "outbound_date": best.outbound_date,
-                "return_date": best.return_date,
-                "out_h": best.out_h, "ret_h": best.ret_h,
-                "out_stops": best.out_stops, "ret_stops": best.ret_stops,
-                "airlines": best.airlines,
-                "booking_url": best.booking_url,
-            }
-            notify.send_ntfy(cfg, payload)
-            with db.conn() as c:
-                db.log_alert(c, trip.name, "rise", best_price_eur, payload)
-            alert_count += 1
-            print(f"  📈 rise alert sent ({best_price_eur:.0f}€)")
+    return len(by_pair), alert_count
 
-    return alert_count
+
+def _rise_alert_recent(c: sqlite3.Connection, trip_name: str,
+                       hours: int = 24) -> bool:
+    """Vrai si une alerte « hausse » a déjà été envoyée récemment.
+
+    Rien ne mémorisait le creux déjà signalé : tant qu'il restait dans la
+    fenêtre 7 jours, la même notification repartait à chaque run.
+    """
+    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+    row = c.execute(
+        "SELECT 1 FROM alerts WHERE trip_name=? AND kind='rise' "
+        "AND sent_at > ? LIMIT 1",
+        (trip_name, cutoff),
+    ).fetchone()
+    return row is not None
 
 
 def _to_eur(r: sources.FlightResult, rates: dict[str, float]) -> float | None:
@@ -370,7 +493,7 @@ def _to_eur(r: sources.FlightResult, rates: dict[str, float]) -> float | None:
 
 
 def _compare_oneway(cfg: Config, best: sources.FlightResult,
-                    rates: dict[str, float]) -> dict | None:
+                    rates: dict[str, float]) -> dict[str, Any] | None:
     """Compare round-trip price vs 2 separate one-ways.
     Returns comparison dict or None if one-ways aren't available."""
     rt_eur = _to_eur(best, rates)
@@ -456,7 +579,7 @@ def _compare_oneway(cfg: Config, best: sources.FlightResult,
 
 
 def _compare_openjaw(cfg: Config, best: sources.FlightResult,
-                     rates: dict[str, float]) -> dict | None:
+                     rates: dict[str, float]) -> dict[str, Any] | None:
     """Recherche open-jaw : aller vers best.destination, retour depuis
     une AUTRE destination thaï, ou retour vers une AUTRE origine française.
 
@@ -476,20 +599,25 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
 
     print(f"  Open-jaw: recherche alternatives pour {best.origin}→{best.destination}...")
 
-    best_oj: dict | None = None
+    # L'aller est le même dans les deux stratégies : une seule requête au
+    # lieu de trois, Duffel ne mettant rien en cache.
+    ow_out = sources.search_duffel_oneway(
+        origin=best.origin, destination=best.destination,
+        dep_date=best.outbound_date, adults=cfg.adults,
+        currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
+    )
+    out_eur = _to_eur(ow_out, rates) if ow_out else None
+    if ow_out is None or not out_eur:
+        print("  Open-jaw: aller introuvable")
+        return None
+    time.sleep(1.0)
+
+    best_oj: dict[str, Any] | None = None
     best_oj_total = 1e9
 
     # Stratégie 1 : même aller, retour depuis autre destination TH → best.origin
     for alt_dest in thai_dests[:2]:
         try:
-            # Aller : best.origin → best.destination (one-way)
-            ow_out = sources.search_duffel_oneway(
-                origin=best.origin, destination=best.destination,
-                dep_date=best.outbound_date, adults=cfg.adults,
-                currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
-            )
-            time.sleep(1.0)
-
             # Retour : alt_dest → best.origin (one-way)
             ow_ret = sources.search_duffel_oneway(
                 origin=alt_dest, destination=best.origin,
@@ -498,10 +626,9 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
             )
             time.sleep(1.0)
 
-            if ow_out and ow_ret:
-                out_eur = _to_eur(ow_out, rates)
+            if ow_ret:
                 ret_eur = _to_eur(ow_ret, rates)
-                if out_eur and ret_eur:
+                if ret_eur:
                     total = out_eur + ret_eur
                     if total < best_oj_total:
                         best_oj_total = total
@@ -520,19 +647,11 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
                             "saving": rt_eur - total,
                         }
         except Exception as e:
-            print(f"  Open-jaw {best.origin}→{best.destination} / "
-                  f"{alt_dest}→{best.origin} error: {e}")
+            print(f"  Open-jaw retour {alt_dest}→{best.origin} error: {e}")
 
     # Stratégie 2 : même aller, retour vers autre origine FR
     for alt_orig in fr_origins[:1]:
         try:
-            ow_out = sources.search_duffel_oneway(
-                origin=best.origin, destination=best.destination,
-                dep_date=best.outbound_date, adults=cfg.adults,
-                currency=cfg.currency, max_fly_h=cfg.max_fly_duration_hours,
-            )
-            time.sleep(1.0)
-
             ow_ret = sources.search_duffel_oneway(
                 origin=best.destination, destination=alt_orig,
                 dep_date=best.return_date, adults=cfg.adults,
@@ -540,10 +659,9 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
             )
             time.sleep(1.0)
 
-            if ow_out and ow_ret:
-                out_eur = _to_eur(ow_out, rates)
+            if ow_ret:
                 ret_eur = _to_eur(ow_ret, rates)
-                if out_eur and ret_eur:
+                if ret_eur:
                     total = out_eur + ret_eur
                     if total < best_oj_total:
                         best_oj_total = total
@@ -744,11 +862,3 @@ def _record_hotel_failure(cfg: Config, hotel: HotelWatch, now: str,
             f"🏨 Suivi hôtel en panne — {hotel.name}",
             f"3 échecs consécutifs.\nDernière raison : {reason}",
         )
-
-
-def _build_cross_checks(cfg: Config, best: sources.FlightResult,
-                        rates: dict[str, float]) -> list[dict]:
-    """Cross-checks additionnels (extensible)."""
-    # VPN cross-check désactivé pour l'instant (fast-flights retiré).
-    # Pourra être réimplémenté avec fli si besoin.
-    return []

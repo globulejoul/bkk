@@ -3,8 +3,18 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
 const fmt = new Intl.NumberFormat('fr-FR');
-const dateFmt = (s) => s ? new Date(s).toLocaleDateString('fr-FR') : '—';
-const dateTimeFmt = (s) => s ? new Date(s).toLocaleString('fr-FR') : '—';
+
+// Le serveur écrit des horodatages naïfs (heure de Paris, sans offset) : le
+// navigateur les interpréterait dans SON fuseau, ce qui décale l'affichage de
+// 5-6 h depuis la Thaïlande. Un horodatage naïf est donc figé tel quel ; un
+// horodatage porteur d'un offset (ou une date seule) est ramené à Paris / UTC.
+const _hasTZ = (s) => /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(s);
+const _asDate = (s) => new Date(s.includes('T') && !_hasTZ(s) ? s + 'Z' : s);
+const _tzOpts = (s) => ({ timeZone: _hasTZ(s) ? 'Europe/Paris' : 'UTC' });
+const dateFmt = (s) => s
+  ? _asDate(String(s)).toLocaleDateString('fr-FR', _tzOpts(String(s))) : '—';
+const dateTimeFmt = (s) => s
+  ? _asDate(String(s)).toLocaleString('fr-FR', _tzOpts(String(s))) : '—';
 const sourceLabel = (s) => {
   if (!s) return '—';
   if (s === 'duffel') return 'Compagnies';
@@ -16,9 +26,13 @@ const esc = (s) => {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 };
+// Valeurs de config injectées dans des attributs : esc() seul renverrait ''
+// pour le nombre 0 (âge d'un enfant, seuil à 0), d'où la conversion préalable.
+const attr = (v) => (v === null || v === undefined || v === '') ? '' : esc(String(v));
 
 let tripChart = null;
 let _totalPax = 1; // nombre total de voyageurs, chargé au démarrage
+let _overviewDirty = false; // un rafraîchissement a été sauté (onglet masqué)
 
 // ── Color interpolation helper ─────────────────────
 function lerpColor(a, b, t) {
@@ -39,12 +53,31 @@ function scoreColor(score) {
 
 // ── Tabs ─────────────────────────────────────────────
 
+// Sémantique tab/tablist posée en JS : le balisage vit dans index.html.
+const _tabsNav = $('.tabs');
+if (_tabsNav) _tabsNav.setAttribute('role', 'tablist');
+
 $$('.tabs button').forEach(b => {
+  const panel = $('#tab-' + b.dataset.tab);
+  b.setAttribute('role', 'tab');
+  b.setAttribute('aria-selected', b.classList.contains('active') ? 'true' : 'false');
+  if (panel) {
+    b.setAttribute('aria-controls', panel.id);
+    panel.setAttribute('role', 'tabpanel');
+  }
   b.addEventListener('click', () => {
-    $$('.tabs button').forEach(x => x.classList.remove('active'));
+    $$('.tabs button').forEach(x => {
+      x.classList.remove('active');
+      x.setAttribute('aria-selected', 'false');
+    });
     $$('.tab').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
+    b.setAttribute('aria-selected', 'true');
     $('#tab-' + b.dataset.tab).classList.add('active');
+    // L'onglet masqué (display:none) rend les canvas 0×0 : on rejoue le
+    // rafraîchissement sauté pendant l'absence au lieu de laisser des
+    // sparklines vides jusqu'au tick suivant.
+    if (b.dataset.tab === 'overview' && _overviewDirty) loadOverview();
     if (b.dataset.tab === 'trip') loadTripDetail();
     if (b.dataset.tab === 'alerts') loadAlerts();
     if (b.dataset.tab === 'runs') loadRuns();
@@ -53,13 +86,27 @@ $$('.tabs button').forEach(b => {
   });
 });
 
+// ── Fetch helper ────────────────────────────────────
+
+// Sans test de r.ok, une 500 renvoyait {detail} : les boucles .forEach()
+// échouaient en silence et la page semblait figée.
+async function api(url, options) {
+  const r = await fetch(url, options);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 // ── Run-now button ──────────────────────────────────
 
-function startPolling(startedAt) {
+// Au-delà, on considère que le run n'a jamais démarré (config invalide,
+// lock déjà pris) : sans ça la sonde concluait sur le run PRÉCÉDENT.
+const RUN_START_TIMEOUT_MS = 30000;
+
+function startPolling(startedAt, previousRunId) {
   const btn = $('#run-now');
   btn.disabled = true;
 
-  const t0 = startedAt ? new Date(startedAt).getTime() : Date.now();
+  const t0 = startedAt ? _asDate(String(startedAt)).getTime() : Date.now();
   const tick = () => {
     const elapsed = Math.round((Date.now() - t0) / 1000);
     const min = Math.floor(elapsed / 60);
@@ -68,23 +115,38 @@ function startPolling(startedAt) {
   };
   tick();
   const timer = setInterval(tick, 1000);
+  const askedAt = Date.now();
+
+  const stop = (label) => {
+    clearInterval(poll);
+    clearInterval(timer);
+    btn.textContent = label;
+    btn.disabled = false;
+    setTimeout(() => { btn.textContent = '↻ Check'; }, 8000);
+  };
 
   const poll = setInterval(async () => {
     try {
-      const runs = await fetch('/api/runs?limit=1').then(r => r.json());
-      if (runs.length && runs[0].status !== 'running') {
-        clearInterval(poll);
-        clearInterval(timer);
-        const run = runs[0];
+      const runs = await api('/api/runs?limit=1');
+      const run = runs.length ? runs[0] : null;
+      // previousRunId non défini = run déjà en cours au chargement.
+      const isNewRun = previousRunId === undefined
+        || (run && run.id !== previousRunId);
+      if (run && isNewRun && run.status !== 'running') {
         const dur = run.finished_at && run.started_at
-          ? Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000)
+          ? Math.round((_asDate(String(run.finished_at))
+                        - _asDate(String(run.started_at))) / 1000)
           : Math.round((Date.now() - t0) / 1000);
-        btn.textContent = run.status === 'ok'
-          ? `✓ ${run.trips_checked} périodes, ${run.alerts_generated} alertes (${dur}s)`
-          : `✗ Erreur (${dur}s)`;
-        btn.disabled = false;
+        // 'partial' = au moins une période collectée, mais pas toutes.
+        // L'afficher comme une erreur ferait croire à un check raté
+        // alors que les prix ont bien été relevés et persistés.
+        const echec = run.status === 'error' || run.status === 'timeout';
+        stop(echec
+          ? `✗ Erreur (${dur}s)`
+          : `${run.status === 'partial' ? '⚠' : '✓'} ${run.trips_checked} périodes, ${run.alerts_generated} alertes (${dur}s)`);
         loadOverview();
-        setTimeout(() => { btn.textContent = '↻ Check'; }, 8000);
+      } else if (!isNewRun && Date.now() - askedAt > RUN_START_TIMEOUT_MS) {
+        stop('✗ run non démarré (voir logs)');
       }
     } catch(e) { /* ignore poll errors */ }
   }, 5000);
@@ -92,7 +154,7 @@ function startPolling(startedAt) {
 
 async function checkRunningState() {
   try {
-    const runs = await fetch('/api/runs?limit=1').then(r => r.json());
+    const runs = await api('/api/runs?limit=1');
     if (runs.length && runs[0].status === 'running') {
       startPolling(runs[0].started_at);
     }
@@ -102,24 +164,49 @@ async function checkRunningState() {
 $('#run-now').addEventListener('click', async () => {
   const btn = $('#run-now');
   btn.disabled = true;
-  const r = await fetch('/api/run-now', { method: 'POST' });
-  if (r.status === 409) {
-    btn.textContent = 'Check en cours...';
-    startPolling(null);
-    return;
+  btn.textContent = '⏳ 0:00';
+  // L'id du dernier run AVANT le POST : la ligne run_log n'est créée qu'après
+  // config.load(), donc tant qu'elle n'apparaît pas rien n'a tourné.
+  let previousRunId;
+  try {
+    const runs = await api('/api/runs?limit=1').catch(() => []);
+    previousRunId = runs.length ? runs[0].id : null;
+    const r = await fetch('/api/run-now', { method: 'POST' });
+    if (r.status === 409) {
+      // Un run tourne déjà : sa ligne existe, on la suit telle quelle.
+      btn.textContent = 'Check en cours...';
+      const cur = await api('/api/runs?limit=1').catch(() => []);
+      startPolling(cur.length ? cur[0].started_at : null);
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    startPolling(null, previousRunId);
+  } catch (e) {
+    btn.textContent = '✗ erreur réseau';
+    btn.disabled = false;
+    setTimeout(() => { btn.textContent = '↻ Check'; }, 8000);
   }
-  startPolling(null);
 });
 
 // ── Overview ────────────────────────────────────────
 
 async function loadOverview() {
-  const [trips, cfgSum] = await Promise.all([
-    fetch('/api/trips').then(r => r.json()),
-    fetch('/api/config-summary').then(r => r.json()),
-  ]);
-  _totalPax = (cfgSum.adults || 1) + (cfgSum.children ? cfgSum.children.length : 0);
+  _overviewDirty = false;
   const grid = $('#trips-grid');
+  let trips, cfgSum;
+  try {
+    [trips, cfgSum] = await Promise.all([
+      api('/api/trips'),
+      api('/api/config-summary'),
+    ]);
+  } catch (e) {
+    // Config momentanément invalide ou API en erreur : le dire plutôt que
+    // laisser une grille vide sans explication.
+    grid.innerHTML = '<p class="dim">Erreur de chargement (config invalide ?) — voir les logs.</p>';
+    $('#last-run').textContent = 'erreur de chargement';
+    return;
+  }
+  _totalPax = (cfgSum.adults || 1) + (cfgSum.children ? cfgSum.children.length : 0);
   grid.innerHTML = '';
 
   let latestRun = null;
@@ -157,11 +244,18 @@ function buildTripCard(t) {
   const card = document.createElement('div');
   card.className = 'trip-card' + (t.current_best === null ? ' no-data' : '');
   card.dataset.trip = t.trip_name;
-  card.addEventListener('click', () => {
+  // Une div cliquable n'est ni focalisable ni activable au clavier sans ça.
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  const open = () => {
     $('#trip-select').value = t.trip_name;
     $$('.tabs button').forEach(b => {
       if (b.dataset.tab === 'trip') b.click();
     });
+  };
+  card.addEventListener('click', open);
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
   });
 
   const dates = `${dateFmt(t.outbound_window?.[0])} → ${dateFmt(t.return_window?.[1])}`;
@@ -189,7 +283,7 @@ function buildTripCard(t) {
     ${t.threshold ? `
       <div class="threshold">
         <span class="dim">Seuil d'alerte</span>
-        <span class="target">≤ ${t.threshold}€</span>
+        <span class="target">≤ ${attr(t.threshold)}€</span>
       </div>
     ` : ''}
     <div class="sparkline-wrap"><canvas class="sparkline"></canvas></div>
@@ -205,16 +299,17 @@ function buildTripCard(t) {
 
 async function loadCardSparkline(tripName) {
   try {
-    const history = await fetch(`/api/trips/${encodeURIComponent(tripName)}/history?days=30`).then(r => {
-      if (!r.ok) throw new Error(r.status);
-      return r.json();
-    });
+    const history = await api(
+      `/api/trips/${encodeURIComponent(tripName)}/history?days=30`);
     if (!history || history.length < 2) return;
 
     const card = document.querySelector(`.trip-card[data-trip="${CSS.escape(tripName)}"]`);
     if (!card) return;
     const canvas = card.querySelector('.sparkline');
     if (!canvas) return;
+    // Onglet masqué (display:none) : le canvas mesure 0×0 et le tracé serait
+    // perdu. On laisse la carte sans sparkline, le prochain passage redessine.
+    if (!canvas.offsetWidth) return;
 
     const prices = history.map(h => h.price_eur);
     const min = Math.min(...prices);
@@ -283,23 +378,36 @@ $$('#chart-period button').forEach(btn => {
   });
 });
 
+// Deux chargements rapprochés (select + boutons de période) s'entrelaçaient :
+// le second appelait new Chart() sur un canvas que le premier n'avait pas
+// encore libéré (« Canvas is already in use »).
+let _tripSeq = 0;
+
 async function loadTripDetail() {
   const name = $('#trip-select').value;
   if (!name) return;
+  const seq = ++_tripSeq;
 
   const daysParam = _chartDays > 0 ? `?days=${_chartDays}` : '?days=9999';
   const enc = encodeURIComponent(name);
-  const [history, routeHistory, breakdown] = await Promise.all([
-    fetch(`/api/trips/${enc}/history${daysParam}`).then(r => r.json()),
-    fetch(`/api/trips/${enc}/history-by-route${daysParam}`).then(r => r.json()),
-    fetch(`/api/trips/${enc}/breakdown`).then(r => r.json()),
-  ]);
+  let history, routeHistory, breakdown, trips;
+  try {
+    [history, routeHistory, breakdown, trips] = await Promise.all([
+      api(`/api/trips/${enc}/history${daysParam}`),
+      api(`/api/trips/${enc}/history-by-route${daysParam}`),
+      api(`/api/trips/${enc}/breakdown`),
+      api('/api/trips'),
+    ]);
+  } catch (e) {
+    if (seq !== _tripSeq) return;
+    $('#breakdown-table').querySelector('tbody').innerHTML =
+      '<tr><td colspan="7" class="dim">Erreur de chargement.</td></tr>';
+    return;
+  }
+  if (seq !== _tripSeq) return;
 
   // Chart with one line per route
   const ctx = $('#trip-chart').getContext('2d');
-  if (tripChart) tripChart.destroy();
-
-  const trips = await fetch('/api/trips').then(r => r.json());
   const tConf = trips.find(x => x.trip_name === name) || {};
 
   // Group route history by route key
@@ -363,6 +471,7 @@ async function loadTripDetail() {
     });
   }
 
+  if (tripChart) tripChart.destroy();
   tripChart = new Chart(ctx, {
     type: 'line',
     data: { datasets },
@@ -414,22 +523,21 @@ async function loadTripDetail() {
   }
 
   // Heatmap
-  loadHeatmap(name);
+  loadHeatmap(name, seq);
 
   // Stats
-  loadTripStats(name);
+  loadTripStats(name, seq);
 }
 
 // ── Heatmap ────────────────────────────────────────
 
-async function loadHeatmap(tripName) {
+async function loadHeatmap(tripName, seq) {
   const container = $('#heatmap-grid');
   container.innerHTML = '';
   try {
-    const data = await fetch(`/api/trips/${encodeURIComponent(tripName)}/heatmap`).then(r => {
-      if (!r.ok) throw new Error(r.status);
-      return r.json();
-    });
+    const data = await api(`/api/trips/${encodeURIComponent(tripName)}/heatmap`);
+    // Un chargement plus récent a pris la main : ne pas écraser son rendu.
+    if (seq !== undefined && seq !== _tripSeq) return;
 
     if (!data || !data.outbound_dates || !data.return_dates || !data.prices
         || !data.outbound_dates.length || !data.return_dates.length) {
@@ -512,18 +620,36 @@ async function loadHeatmap(tripName) {
 
 // ── Trip stats ─────────────────────────────────────
 
-const DAY_NAMES = ['dim', 'lun', 'mar', 'mer', 'jeu', 'ven', 'sam'];
+// /api/trips/*/stats renvoie trend = {direction, change_pct, recommendation}.
+// L'ancien code comparait cet objet à une chaîne ('falling') puis à 0 : deux
+// tests toujours faux, d'où un « stable » permanent. Le seuil de ±2 % est
+// appliqué côté serveur, on ne rebranche donc que sur direction.
+function trendInfo(trend) {
+  const dir = (trend && trend.direction) || 'stable';
+  if (dir === 'falling') {
+    return { arrow: '↘', text: 'en baisse', cls: 'falling', color: 'var(--green)' };
+  }
+  if (dir === 'rising') {
+    return { arrow: '↗', text: 'en hausse', cls: 'rising', color: 'var(--rose)' };
+  }
+  return { arrow: '→', text: 'stable', cls: 'stable', color: 'var(--text-dim)' };
+}
 
-async function loadTripStats(tripName) {
+function trendPct(trend) {
+  const pct = trend && trend.change_pct;
+  if (!pct) return '';
+  return ` (${pct > 0 ? '+' : ''}${pct} %)`;
+}
+
+async function loadTripStats(tripName, seq) {
   const container = $('#stats-content');
   container.innerHTML = '';
   try {
-    const stats = await fetch(`/api/trips/${encodeURIComponent(tripName)}/stats`).then(r => {
-      if (!r.ok) throw new Error(r.status);
-      return r.json();
-    });
+    const stats = await api(`/api/trips/${encodeURIComponent(tripName)}/stats`);
+    // Un chargement plus récent a pris la main : ne pas écraser son rendu.
+    if (seq !== undefined && seq !== _tripSeq) return;
 
-    if (!stats || (stats.trend == null && stats.buy_score == null && !stats.day_of_week)) {
+    if (!stats || (stats.trend == null && stats.buy_score == null)) {
       container.innerHTML = '<div class="stats-no-data">Pas de données statistiques disponibles.</div>';
       return;
     }
@@ -532,20 +658,14 @@ async function loadTripStats(tripName) {
 
     // Trend
     if (stats.trend != null) {
-      let arrow, text, cls;
-      if (stats.trend === 'falling' || stats.trend < 0) {
-        arrow = '\u2198'; text = 'en baisse'; cls = 'falling';
-      } else if (stats.trend === 'rising' || stats.trend > 0) {
-        arrow = '\u2197'; text = 'en hausse'; cls = 'rising';
-      } else {
-        arrow = '\u2192'; text = 'stable'; cls = 'stable';
-      }
+      const ti = trendInfo(stats.trend);
+      const reco = (stats.trend && stats.trend.recommendation) || stats.recommendation;
       html += `
         <div class="stats-trend">
-          <span class="trend-arrow" style="color:${cls === 'falling' ? 'var(--green)' : cls === 'rising' ? 'var(--rose)' : 'var(--text-dim)'}">${arrow}</span>
+          <span class="trend-arrow" style="color:${ti.color}">${ti.arrow}</span>
           <div>
-            <div class="trend-text">Tendance : <strong>${esc(text)}</strong></div>
-            ${stats.recommendation ? `<div class="dim" style="font-size:0.75rem;margin-top:0.15rem">${esc(stats.recommendation)}</div>` : ''}
+            <div class="trend-text">Tendance : <strong>${esc(ti.text)}</strong>${esc(trendPct(stats.trend))}</div>
+            ${reco ? `<div class="dim" style="font-size:0.75rem;margin-top:0.15rem">${esc(reco)}</div>` : ''}
           </div>
         </div>`;
     }
@@ -575,54 +695,10 @@ async function loadTripStats(tripName) {
         </div>`;
     }
 
-    // Day of week chart
-    if (stats.day_of_week && Object.keys(stats.day_of_week).length) {
-      const dow = stats.day_of_week; // object like {0: avg, 1: avg, ...} or {dim: avg, ...}
-      // Normalize to array of 7 values
-      let values = [];
-      if (Array.isArray(dow)) {
-        values = dow.map(v => v != null ? v : null);
-      } else {
-        // Could be keyed by day index (0-6) or by name
-        for (let i = 0; i < 7; i++) {
-          const v = dow[i] ?? dow[String(i)] ?? dow[DAY_NAMES[i]] ?? null;
-          values.push(v);
-        }
-      }
-
-      const validValues = values.filter(v => v != null && v > 0);
-      if (validValues.length) {
-        const maxVal = Math.max(...validValues);
-        const minVal = Math.min(...validValues);
-        const cheapestIdx = values.indexOf(minVal);
-
-        html += `<div class="stats-dow">
-          <div class="dow-title">Prix moyen par jour de la semaine</div>
-          <div class="dow-chart">`;
-        for (let i = 0; i < 7; i++) {
-          const v = values[i];
-          if (v != null && v > 0) {
-            const pct = maxVal > 0 ? Math.max(10, (v / maxVal) * 100) : 10;
-            const isCheapest = i === cheapestIdx;
-            const barColor = isCheapest ? 'var(--green)' : 'var(--gold)';
-            html += `
-              <div class="dow-bar-wrap">
-                <div class="dow-price">${Math.round(v)}\u202F\u20AC</div>
-                <div class="dow-bar${isCheapest ? ' dow-cheapest' : ''}" style="height:${pct}%;background:${barColor}"></div>
-                <div class="dow-label">${DAY_NAMES[i]}</div>
-              </div>`;
-          } else {
-            html += `
-              <div class="dow-bar-wrap">
-                <div class="dow-price">\u2014</div>
-                <div class="dow-bar" style="height:10%;background:var(--bg-elev)"></div>
-                <div class="dow-label">${DAY_NAMES[i]}</div>
-              </div>`;
-          }
-        }
-        html += '</div></div>';
-      }
-    }
+    // Le bloc \u00AB Prix moyen par jour de la semaine \u00BB a \u00E9t\u00E9 retir\u00E9 : l'API
+    // moyenne par jour du RELEV\u00C9 (et toutes routes confondues), pas par jour
+    // de vol \u2014 avec un cron toutes les 6 h la variation n'est que du bruit.
+    // Le rendu ne s'affichait d'ailleurs jamais (objets compar\u00E9s \u00E0 0).
 
     html += '</div>';
     container.innerHTML = html;
@@ -689,10 +765,7 @@ function _renderScoreHistory(data) {
 
 async function loadCardIndicators(tripName) {
   try {
-    const stats = await fetch(`/api/trips/${encodeURIComponent(tripName)}/stats`).then(r => {
-      if (!r.ok) throw new Error(r.status);
-      return r.json();
-    });
+    const stats = await api(`/api/trips/${encodeURIComponent(tripName)}/stats`);
 
     const card = document.querySelector(`.trip-card[data-trip="${CSS.escape(tripName)}"]`);
     if (!card) return;
@@ -702,16 +775,10 @@ async function loadCardIndicators(tripName) {
 
     // Trend badge
     if (stats && stats.trend != null && trendBadge) {
-      let arrow, text, cls;
-      if (stats.trend === 'falling' || stats.trend < 0) {
-        arrow = '\u2198'; text = 'en baisse'; cls = 'falling';
-      } else if (stats.trend === 'rising' || stats.trend > 0) {
-        arrow = '\u2197'; text = 'en hausse'; cls = 'rising';
-      } else {
-        arrow = '\u2192'; text = 'stable'; cls = 'stable';
-      }
-      trendBadge.className = 'trend-badge ' + cls;
-      trendBadge.textContent = arrow + ' ' + text;
+      const ti = trendInfo(stats.trend);
+      trendBadge.className = 'trend-badge ' + ti.cls;
+      trendBadge.textContent = ti.arrow + ' ' + ti.text + trendPct(stats.trend);
+      if (stats.trend.recommendation) trendBadge.title = stats.trend.recommendation;
     } else if (trendBadge) {
       trendBadge.style.display = 'none';
     }
@@ -738,8 +805,14 @@ async function loadCardIndicators(tripName) {
 // ── Alerts ──────────────────────────────────────────
 
 async function loadAlerts() {
-  const alerts = await fetch('/api/alerts').then(r => r.json());
   const list = $('#alerts-list');
+  let alerts;
+  try {
+    alerts = await api('/api/alerts');
+  } catch (e) {
+    list.innerHTML = '<p class="dim">Erreur de chargement des alertes.</p>';
+    return;
+  }
   list.innerHTML = '';
   if (!alerts.length) {
     list.innerHTML = '<p class="dim">Aucune alerte pour le moment.</p>';
@@ -747,13 +820,28 @@ async function loadAlerts() {
   }
   alerts.forEach(a => {
     const p = a.payload || {};
+    const isHotel = a.kind === 'hotel_low';
     const card = document.createElement('div');
     let cls = 'alert-card';
     if (a.kind === 'rise') cls += ' rise';
     else if (p.hit_threshold) cls += ' threshold';
     card.className = cls;
-    const kindLabel = a.kind === 'rise' ? '📈 Hausse'
+    // Une alerte hôtel n'a ni compagnie ni origine/destination : sans branche
+    // dédiée elle s'affichait en « 📉 Nouveau bas • ? → ? ».
+    const kindLabel = isHotel ? (p.hit_threshold ? '🏨 Seuil atteint' : '🏨 Hôtel')
+      : a.kind === 'rise' ? '📈 Hausse'
       : p.hit_threshold ? '🎯 Seuil atteint' : '📉 Nouveau bas';
+    let meta;
+    if (isHotel) {
+      const providers = Array.isArray(p.providers_seen) ? p.providers_seen : [];
+      meta = `${p.checkin ? esc(dateFmt(p.checkin)) + ' → ' + esc(dateFmt(p.checkout)) : '—'}`
+        + `${p.nights ? ' · ' + esc(String(p.nights)) + ' nuits' : ''}`
+        + `${p.source ? ' · ' + esc(p.source) : ''}`
+        + `${providers.length ? '<br>' + esc(providers.join(', ')) : ''}`;
+    } else {
+      meta = `${esc(p.airlines) || ''} • ${esc(p.origin) || '?'} → ${esc(p.destination) || '?'}`
+        + `${p.outbound_date ? ' • ' + esc(p.outbound_date) + ' → ' + esc(p.return_date) : ''}`;
+    }
     card.innerHTML = `
       <div class="alert-header">
         <div>
@@ -762,10 +850,7 @@ async function loadAlerts() {
         </div>
         <div class="price">${Math.round(a.price_eur)}€</div>
       </div>
-      <div class="alert-meta">
-        ${esc(p.airlines) || ''} • ${esc(p.origin) || '?'} → ${esc(p.destination) || '?'}
-        ${p.outbound_date ? '• ' + esc(p.outbound_date) + ' → ' + esc(p.return_date) : ''}
-      </div>
+      <div class="alert-meta">${meta}</div>
     `;
     list.appendChild(card);
   });
@@ -774,12 +859,18 @@ async function loadAlerts() {
 // ── Runs log ─────────────────────────────────────────
 
 async function loadRuns() {
-  const runs = await fetch('/api/runs').then(r => r.json());
   const tbody = $('#runs-table tbody');
+  let runs;
+  try {
+    runs = await api('/api/runs');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="6" class="dim">Erreur de chargement.</td></tr>';
+    return;
+  }
   tbody.innerHTML = '';
   runs.forEach(r => {
     const dur = r.finished_at && r.started_at
-      ? Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000) + 's'
+      ? Math.round((_asDate(String(r.finished_at)) - _asDate(String(r.started_at))) / 1000) + 's'
       : (r.status === 'running' ? '…' : '—');
     const statusColor = r.status === 'ok' ? 'var(--teal)'
       : r.status === 'error' ? 'var(--rose)' : 'var(--gold)';
@@ -825,11 +916,15 @@ async function loadWeather() {
       <div>Bangkok maintenant${esc(feel)}</div>
     `;
 
-    const today = new Date().toISOString().slice(0, 10);
+    // daily.time est en Asia/Bangkok : la date UTC pointait sur la veille
+    // entre 19 h et 2 h (heure de Paris). sv-SE donne le format AAAA-MM-JJ.
+    const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Bangkok' })
+      .format(new Date());
     const times = daily.time || [];
     const todayIdx = times.indexOf(today);
     const labels = times.map(d =>
-      new Date(d).toLocaleDateString('fr-FR', {weekday: 'short', day: 'numeric'})
+      new Date(d).toLocaleDateString('fr-FR',
+        {weekday: 'short', day: 'numeric', timeZone: 'UTC'})
     );
 
     // Point sizes: bigger for today
@@ -994,7 +1089,7 @@ let hotelChart = null;
 
 async function loadHotels() {
   try {
-    const hotels = await fetch('/api/hotels').then(r => r.json());
+    const hotels = await api('/api/hotels');
     const grid = $('#hotels-grid');
     grid.innerHTML = '';
 
@@ -1021,6 +1116,8 @@ async function loadHotels() {
     loadHotelDetail();
   } catch (e) {
     console.error('loadHotels error:', e);
+    $('#hotels-grid').innerHTML =
+      '<p class="dim">Erreur de chargement des hôtels — voir les logs.</p>';
   }
 }
 
@@ -1049,11 +1146,18 @@ function hotelStatus(h) {
 function buildHotelCard(h) {
   const card = document.createElement('div');
   card.className = 'trip-card' + (h.current_best === null ? ' no-data' : '');
-  card.addEventListener('click', () => {
+  // Une div cliquable n'est ni focalisable ni activable au clavier sans ça.
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  const open = () => {
     // Les <option> ont pour value h.hotel_name : toute autre valeur
     // laissait le select vide et le détail ne se chargeait jamais.
     $('#hotel-select').value = h.hotel_name;
     loadHotelDetail();
+  };
+  card.addEventListener('click', open);
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
   });
 
   let priceTxt = '— —', priceClass = 'none';
@@ -1075,7 +1179,7 @@ function buildHotelCard(h) {
       <span><span class="stat-label">bas</span> ${h.lowest_price_eur != null ? Math.round(h.lowest_price_eur) + '€' : '—'}</span>
       <span><span class="stat-label">moy 30j</span> ${h.avg_30d != null ? Math.round(h.avg_30d) + '€' : '—'}</span>
     </div>
-    ${h.threshold ? `<div class="threshold"><span class="dim">Seuil</span><span class="target">≤ ${h.threshold}€</span></div>` : ''}
+    ${h.threshold ? `<div class="threshold"><span class="dim">Seuil</span><span class="target">≤ ${attr(h.threshold)}€</span></div>` : ''}
     <div class="hotel-status"></div>
   `;
   const st = hotelStatus(h);
@@ -1095,10 +1199,17 @@ async function loadHotelDetail() {
   const hotelName = $('#hotel-select').value;
   if (!hotelName) return;
 
-  const [history, breakdown] = await Promise.all([
-    fetch(`/api/hotels/${encodeURIComponent(hotelName)}/history`).then(r => r.json()),
-    fetch(`/api/hotels/${encodeURIComponent(hotelName)}/breakdown`).then(r => r.json()),
-  ]);
+  let history, breakdown;
+  try {
+    [history, breakdown] = await Promise.all([
+      api(`/api/hotels/${encodeURIComponent(hotelName)}/history`),
+      api(`/api/hotels/${encodeURIComponent(hotelName)}/breakdown`),
+    ]);
+  } catch (e) {
+    $('#hotel-breakdown-table').querySelector('tbody').innerHTML =
+      '<tr><td colspan="4" class="dim">Erreur de chargement.</td></tr>';
+    return;
+  }
 
   // Chart
   const ctx = $('#hotel-chart').getContext('2d');
@@ -1157,15 +1268,15 @@ let _adminConfig = null;
 
 async function loadAdmin() {
   try {
-    _adminConfig = await fetch('/api/admin/config').then(r => r.json());
+    _adminConfig = await api('/api/admin/config');
     renderOrigins();
     renderDestinations();
     renderTravelers();
     renderTrips();
     renderHotelsAdmin();
-    $('#admin-status').textContent = '';
+    adminMessage('');
   } catch (e) {
-    $('#admin-status').textContent = 'Erreur chargement config';
+    adminMessage('Erreur chargement config');
   }
 }
 
@@ -1179,6 +1290,8 @@ function renderOrigins() {
     const btn = document.createElement('button');
     btn.className = 'tag-remove';
     btn.textContent = '\u00d7';
+    btn.setAttribute('aria-label', `Retirer le d\u00e9part ${o}`);
+    btn.title = 'Retirer';
     btn.addEventListener('click', () => { _adminConfig.origins.splice(i, 1); renderOrigins(); });
     tag.appendChild(btn);
     container.appendChild(tag);
@@ -1195,16 +1308,33 @@ function renderDestinations() {
     const btn = document.createElement('button');
     btn.className = 'tag-remove';
     btn.textContent = '\u00d7';
+    btn.setAttribute('aria-label', `Retirer la destination ${d}`);
+    btn.title = 'Retirer';
     btn.addEventListener('click', () => { _adminConfig.destinations.splice(i, 1); renderDestinations(); });
     tag.appendChild(btn);
     container.appendChild(tag);
   });
 }
 
+// Un code IATA fait exactement 3 lettres : « LYON », « CD G » ou « 123 »
+// étaient acceptés et partaient dans chaque combinaison de recherche.
+const IATA_RE = /^[A-Z]{3}$/;
+
+function adminMessage(msg) {
+  const status = $('#admin-status');
+  status.textContent = msg;
+  status.style.color = msg ? 'var(--rose)' : '';
+}
+
 function addOrigin() {
   const input = $('#add-origin');
   const val = input.value.trim().toUpperCase();
-  if (!val || val.length < 3) return;
+  if (!val) return;
+  if (!IATA_RE.test(val)) {
+    adminMessage(`Code IATA invalide : « ${val} » (3 lettres attendues, ex. CDG)`);
+    return;
+  }
+  adminMessage('');
   if (_adminConfig.origins.includes(val)) return;
   _adminConfig.origins.push(val);
   renderOrigins();
@@ -1219,7 +1349,12 @@ function removeOrigin(i) {
 function addDestination() {
   const input = $('#add-dest');
   const val = input.value.trim().toUpperCase();
-  if (!val || val.length < 3) return;
+  if (!val) return;
+  if (!IATA_RE.test(val)) {
+    adminMessage(`Code IATA invalide : « ${val} » (3 lettres attendues, ex. BKK)`);
+    return;
+  }
+  adminMessage('');
   if (_adminConfig.destinations.includes(val)) return;
   _adminConfig.destinations.push(val);
   renderDestinations();
@@ -1243,11 +1378,12 @@ function renderTravelers() {
       <div class="child-row">
         <label for="child-age-${i}" class="child-label">Enfant ${i + 1}</label>
         <div class="input-unit">
-          <input type="number" id="child-age-${i}" name="child-age-${i}" min="0" max="17" value="${age}"
+          <input type="number" id="child-age-${i}" name="child-age-${i}" min="0" max="17" value="${attr(age)}"
                  data-child-idx="${i}">
           <span class="unit">ans</span>
         </div>
-        <button class="tag-remove" data-remove-child="${i}" title="Retirer">\u00d7</button>
+        <button class="tag-remove" data-remove-child="${i}" title="Retirer"
+                aria-label="Retirer l'enfant ${i + 1}">\u00d7</button>
       </div>`;
   });
 
@@ -1256,7 +1392,7 @@ function renderTravelers() {
     <div class="travelers-row">
       <div class="travelers-field">
         <label for="admin-adults">Adultes</label>
-        <input type="number" id="admin-adults" name="admin-adults" min="1" max="9" value="${adults}">
+        <input type="number" id="admin-adults" name="admin-adults" min="1" max="9" value="${attr(adults)}">
       </div>
       <div class="travelers-field">
         <span class="travelers-field-title">Enfants</span>
@@ -1268,7 +1404,7 @@ function renderTravelers() {
       <div class="travelers-field">
         <label for="admin-max-fly">Durée vol max</label>
         <div class="input-unit">
-          <input type="number" id="admin-max-fly" name="admin-max-fly" min="6" max="48" value="${maxFly}">
+          <input type="number" id="admin-max-fly" name="admin-max-fly" min="6" max="48" value="${attr(maxFly)}">
           <span class="unit">h</span>
         </div>
       </div>
@@ -1319,27 +1455,28 @@ function renderHotelsAdmin() {
           <span class="toggle-slider"></span>
         </label>
         <span class="trip-edit-name">${esc(h.name)}</span>
-        <button class="tag-remove" data-remove-hotel="${idx}" title="Supprimer">\u00d7</button>
+        <button class="tag-remove" data-remove-hotel="${idx}" title="Supprimer"
+                aria-label="Supprimer l'h\u00f4tel ${esc(h.name)}">\u00d7</button>
       </div>
       <div class="trip-edit-row">
         <label for="hotel-${idx}-entity">Entity ID</label>
         <input type="text" id="hotel-${idx}-entity" name="hotel-${idx}-entity"
-               value="${esc(h.entity_id)}" data-hotel="${idx}" data-field="entity_id"
+               value="${attr(h.entity_id)}" data-hotel="${idx}" data-field="entity_id"
                style="font-size:0.7rem;width:220px">
       </div>
       <div class="trip-edit-row trip-date-row">
         <label for="hotel-${idx}-checkin">Check-in</label>
         <input type="date" id="hotel-${idx}-checkin" name="hotel-${idx}-checkin"
-               value="${h.checkin || ''}" data-hotel="${idx}" data-field="checkin">
+               value="${attr(h.checkin)}" data-hotel="${idx}" data-field="checkin">
         <span class="date-sep">check-out</span>
         <input type="date" id="hotel-${idx}-checkout" name="hotel-${idx}-checkout"
-               value="${h.checkout || ''}" data-hotel="${idx}" data-field="checkout">
+               value="${attr(h.checkout)}" data-hotel="${idx}" data-field="checkout">
       </div>
       <div class="trip-edit-row">
         <label for="hotel-${idx}-threshold">Seuil alerte</label>
         <div class="input-unit">
           <input type="number" id="hotel-${idx}-threshold" name="hotel-${idx}-threshold"
-                 value="${h.price_threshold || ''}" placeholder="4500" data-hotel="${idx}" data-field="price_threshold">
+                 value="${attr(h.price_threshold)}" placeholder="4500" data-hotel="${idx}" data-field="price_threshold">
           <span class="unit">\u20ac</span>
         </div>
       </div>
@@ -1397,7 +1534,9 @@ function renderTrips() {
     card.className = 'trip-edit-card';
     const ow = trip.outbound_window || ['', ''];
     const rw = trip.return_window || ['', ''];
-    const vac = VACANCES_ZONE_A[trip.name];
+    // Les dates officielles viennent de la config si elle les porte : la table
+    // codée en dur ci-dessus ne couvre que 2026-2027 et indexe par nom exact.
+    const vac = trip.vacation || VACANCES_ZONE_A[trip.name];
     const vacInfo = vac
       ? `<span class="dim trip-edit-vac">Vacances : ${dateFmt(vac[0])} \u2192 ${dateFmt(vac[1])}</span>`
       : '';
@@ -1414,20 +1553,20 @@ function renderTrips() {
       </div>
       <div class="trip-edit-row trip-date-row">
         <label for="trip-${idx}-ow0">Aller entre le</label>
-        <input type="date" id="trip-${idx}-ow0" name="trip-${idx}-ow0" data-trip="${idx}" data-field="ow0" value="${ow[0]}">
+        <input type="date" id="trip-${idx}-ow0" name="trip-${idx}-ow0" data-trip="${idx}" data-field="ow0" value="${attr(ow[0])}">
         <span class="date-sep">et le</span>
-        <input type="date" id="trip-${idx}-ow1" name="trip-${idx}-ow1" data-trip="${idx}" data-field="ow1" value="${ow[1]}">
+        <input type="date" id="trip-${idx}-ow1" name="trip-${idx}-ow1" data-trip="${idx}" data-field="ow1" value="${attr(ow[1])}">
       </div>
       <div class="trip-edit-row trip-date-row">
         <label for="trip-${idx}-rw0">Retour entre le</label>
-        <input type="date" id="trip-${idx}-rw0" name="trip-${idx}-rw0" data-trip="${idx}" data-field="rw0" value="${rw[0]}">
+        <input type="date" id="trip-${idx}-rw0" name="trip-${idx}-rw0" data-trip="${idx}" data-field="rw0" value="${attr(rw[0])}">
         <span class="date-sep">et le</span>
-        <input type="date" id="trip-${idx}-rw1" name="trip-${idx}-rw1" data-trip="${idx}" data-field="rw1" value="${rw[1]}">
+        <input type="date" id="trip-${idx}-rw1" name="trip-${idx}-rw1" data-trip="${idx}" data-field="rw1" value="${attr(rw[1])}">
       </div>
       <div class="trip-edit-row">
         <label for="trip-${idx}-threshold">Seuil alerte</label>
         <div class="input-unit">
-          <input type="number" id="trip-${idx}-threshold" name="trip-${idx}-threshold" data-trip="${idx}" data-field="threshold" value="${trip.price_threshold || ''}" placeholder="800">
+          <input type="number" id="trip-${idx}-threshold" name="trip-${idx}-threshold" data-trip="${idx}" data-field="threshold" value="${attr(trip.price_threshold)}" placeholder="800">
           <span class="unit">\u20ac</span>
         </div>
       </div>
@@ -1451,6 +1590,20 @@ function renderTrips() {
   });
 }
 
+// FastAPI renvoie un `detail` tableau pour une erreur de validation
+// Pydantic, et une chaîne pour celles levées par config.save_raw.
+// Sans ce tri, l'admin affichait « Erreur : [object Object] ».
+function formatDetail(detail, fallback) {
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(e => {
+      const champ = (e.loc || []).slice(1).join('.');
+      return champ ? `${champ} : ${e.msg}` : e.msg;
+    }).join(' ; ');
+  }
+  return fallback;
+}
+
 async function saveConfig() {
   const btn = $('#admin-save');
   const status = $('#admin-status');
@@ -1464,7 +1617,7 @@ async function saveConfig() {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      throw new Error(err.detail || r.statusText);
+      throw new Error(formatDetail(err.detail, r.statusText));
     }
     status.textContent = 'Sauvegardé !';
     status.style.color = 'var(--green)';
@@ -1497,13 +1650,34 @@ loadOverview();
 loadIntro();
 loadInfos();
 checkRunningState();
-setInterval(loadOverview, 60000);
+
+// Le rafraîchissement était minuté à 60 s, onglet en arrière-plan compris :
+// ~17 000 appels internes par jour pour un cron qui tourne toutes les 6 h.
+// On espace à 5 min et on saute les ticks inutiles (onglet caché ou autre
+// section), le rattrapage se fait au retour sur « Vue d'ensemble ».
+const OVERVIEW_REFRESH_MS = 300000;
+setInterval(() => {
+  const overview = $('#tab-overview');
+  if (document.hidden || !overview || !overview.classList.contains('active')) {
+    _overviewDirty = true;
+    return;
+  }
+  loadOverview();
+}, OVERVIEW_REFRESH_MS);
+
+document.addEventListener('visibilitychange', () => {
+  const overview = $('#tab-overview');
+  if (!document.hidden && _overviewDirty
+      && overview && overview.classList.contains('active')) {
+    loadOverview();
+  }
+});
 
 async function loadIntro() {
   try {
     const [cfg, trips] = await Promise.all([
-      fetch('/api/config-summary').then(r => r.json()),
-      fetch('/api/trips').then(r => r.json()),
+      api('/api/config-summary'),
+      api('/api/trips'),
     ]);
     const cron = parseCron(cfg.schedule_cron);
     const kids = cfg.children && cfg.children.length
@@ -1511,13 +1685,29 @@ async function loadIntro() {
       : '';
     const pax = (cfg.adults === 1 ? '1 adulte' : cfg.adults + ' adultes') + kids;
     const nbPeriodes = trips.length;
+    // L'intro annonçait « Dates ±3j » alors que les fenêtres sont libres dans
+    // config.yml (jusqu'à 27 jours) : on les mesure au lieu de les supposer.
     $('#intro').textContent =
       `Check auto ${cron} pour ${pax} · ` +
       `${nbPeriodes} périodes vacances Zone A · ` +
       `Départs ${cfg.origins.join(', ')} → ${cfg.destinations.join(', ')} · ` +
-      `Dates ±3j autour des vacances · ` +
+      `${windowLabel(trips)} · ` +
       `Vols < ${cfg.max_fly_duration_hours}h`;
   } catch(e) {}
+}
+
+// Largeur réelle des fenêtres de dates aller, en jours (bornes incluses).
+function windowLabel(trips) {
+  const widths = trips.map(t => {
+    const w = t.outbound_window;
+    if (!w || !w[0] || !w[1]) return 0;
+    return Math.round((_asDate(w[1]) - _asDate(w[0])) / 86400000) + 1;
+  }).filter(n => n > 0);
+  if (!widths.length) return 'Fenêtres de dates libres';
+  const min = Math.min(...widths), max = Math.max(...widths);
+  return min === max
+    ? `Fenêtres de ${min} j`
+    : `Fenêtres de ${min} à ${max} j`;
 }
 
 function parseCron(expr) {

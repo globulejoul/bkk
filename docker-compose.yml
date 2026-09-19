@@ -9,8 +9,32 @@ services:
       NTFY_TOKEN: ${NTFY_TOKEN:-}
       TZ: Europe/Paris
     volumes:
-      - ./config.yml:/app/config.yml
+      # create_host_path: false -> si config.yml manque, Docker echoue avec un message
+      # clair au lieu de creer un REPERTOIRE config.yml (crash loop au demarrage).
+      - type: bind
+        source: ./config.yml
+        target: /app/config.yml
+        bind:
+          create_host_path: false
       - ./data:/app/data
     ports:
       - "127.0.0.1:8080:8080"
     restart: unless-stopped
+    # Python en PID 1 ne moissonne pas les processus zombies laisses par Chromium.
+    init: true
+    # VPS partage : un Chromium qui fuit ne doit pas pouvoir OOM-killer les autres projets.
+    mem_limit: 2g
+    memswap_limit: 2g
+    # Logs non bornes sinon (~1 Mo/jour d'acces uvicorn avec le polling du dashboard).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # start_period genereux : l'import de Playwright + le demarrage d'uvicorn sont lents.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s

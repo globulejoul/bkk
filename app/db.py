@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -109,6 +110,12 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE hotel_state ADD COLUMN consecutive_failures INTEGER DEFAULT 0;
         ALTER TABLE hotel_state ADD COLUMN last_alert_at TEXT;
     """),
+    # Les requêtes du dashboard filtrent toutes sur (trip_name, check_date)
+    # puis agrègent price_eur : index couvrant pour éviter le balayage.
+    (5, """
+        CREATE INDEX IF NOT EXISTS idx_checks_trip_date
+            ON checks(trip_name, check_date, price_eur);
+    """),
 ]
 
 
@@ -132,54 +139,99 @@ def _detect_pre_migration_db(c: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def _split_statements(sql: str) -> list[str]:
+    """Découpe un script en instructions : executescript committe
+    implicitement, il ne peut donc pas servir dans une transaction."""
+    statements: list[str] = []
+    buf = ""
+    for line in sql.splitlines(keepends=True):
+        buf += line
+        if buf.strip() and sqlite3.complete_statement(buf):
+            statements.append(buf.strip())
+            buf = ""
+    tail = buf.strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
+_ADD_COLUMN_RE = re.compile(
+    r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+(?:COLUMN\s+)?(\w+)", re.IGNORECASE
+)
+
+
+def _add_column_already_applied(c: sqlite3.Connection, stmt: str) -> bool:
+    """Rend les ALTER TABLE ADD COLUMN rejouables : une migration
+    interrompue autrefois a pu en appliquer une partie sans se taguer."""
+    m = _ADD_COLUMN_RE.match(stmt)
+    if not m:
+        return False
+    table, column = m.group(1), m.group(2)
+    cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+    return column in cols
+
+
+def _apply_migration(c: sqlite3.Connection, version: int, sql: str) -> None:
+    """DDL et tag de version dans la même transaction : sinon un crash
+    entre les deux fait rejouer la migration au démarrage suivant."""
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        for stmt in _split_statements(sql):
+            if _add_column_already_applied(c, stmt):
+                continue
+            c.execute(stmt)
+        c.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (version, datetime.now().isoformat()),
+        )
+        c.execute("COMMIT")
+    except Exception:
+        try:
+            c.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    print(f"DB migration: applied v{version}")
+
+
 def init() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with conn() as c:
+        # WAL est persistant dans le fichier : posé une fois ici plutôt
+        # que rejoué à chaque connexion.
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+        """)
         cur = _current_version(c)
 
         # Bootstrap: DB existante créée avant le système de migrations
         if cur == 0 and _detect_pre_migration_db(c):
-            c.executescript("""
-                CREATE TABLE IF NOT EXISTS schema_version (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                );
-            """)
-            from datetime import datetime
             c.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) "
+                "VALUES (?, ?)",
                 (1, datetime.now().isoformat()),
             )
             cur = 1
             print("DB migration: existing database tagged as v1")
 
-        # Ensure schema_version table exists
-        if cur == 0:
-            c.executescript("""
-                CREATE TABLE IF NOT EXISTS schema_version (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                );
-            """)
-
         # Apply pending migrations
         for version, sql in MIGRATIONS:
             if version <= cur:
                 continue
-            c.executescript(sql)
-            from datetime import datetime
-            c.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (version, datetime.now().isoformat()),
-            )
-            print(f"DB migration: applied v{version}")
+            _apply_migration(c, version, sql)
 
 
 @contextmanager
 def conn() -> Iterator[sqlite3.Connection]:
     c = sqlite3.connect(DB_PATH, isolation_level=None)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
+    # Deux runs peuvent écrire en même temps (cron + /api/run-now) :
+    # on attend le verrou au lieu d'échouer sur « database is locked ».
+    c.execute("PRAGMA busy_timeout=10000")
     c.execute("PRAGMA foreign_keys=ON")
     try:
         yield c
@@ -227,23 +279,23 @@ def upsert_state(c: sqlite3.Connection, trip: str, **kwargs) -> None:
     bad = set(kwargs.keys()) - _VALID_STATE_COLS
     if bad:
         raise ValueError(f"Invalid state columns: {bad}")
-    current = c.execute("SELECT 1 FROM state WHERE trip_name=?", (trip,)).fetchone()
-    if current:
-        sets = ", ".join(f"{k}=:{k}" for k in kwargs)
-        c.execute(f"UPDATE state SET {sets} WHERE trip_name=:trip",
-                  {**kwargs, "trip": trip})
-    else:
-        cols = ["trip_name"] + list(kwargs.keys())
-        vals = ["?"] * len(cols)
-        c.execute(
-            f"INSERT INTO state ({','.join(cols)}) VALUES ({','.join(vals)})",
-            (trip, *kwargs.values()),
-        )
+    if not kwargs:
+        c.execute("INSERT OR IGNORE INTO state (trip_name) VALUES (?)", (trip,))
+        return
+    # UPSERT en une seule instruction : le SELECT puis UPDATE/INSERT
+    # précédent pouvait perdre l'écriture d'un run concurrent.
+    cols = ["trip_name"] + list(kwargs.keys())
+    placeholders = ", ".join(f":{k}" for k in cols)
+    sets = ", ".join(f"{k}=excluded.{k}" for k in kwargs)
+    c.execute(
+        f"INSERT INTO state ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(trip_name) DO UPDATE SET {sets}",
+        {**kwargs, "trip_name": trip},
+    )
 
 
 def log_alert(c: sqlite3.Connection, trip: str, kind: str,
               price_eur: float, payload: dict) -> None:
-    from datetime import datetime
     c.execute(
         """INSERT INTO alerts (sent_at, trip_name, kind, price_eur, payload_json)
            VALUES (?, ?, ?, ?, ?)""",
@@ -252,7 +304,6 @@ def log_alert(c: sqlite3.Connection, trip: str, kind: str,
 
 
 def start_run(c: sqlite3.Connection) -> int:
-    from datetime import datetime
     cur = c.execute(
         "INSERT INTO run_log (started_at, status) VALUES (?, 'running')",
         (datetime.now().isoformat(),),
@@ -262,7 +313,6 @@ def start_run(c: sqlite3.Connection) -> int:
 
 def finish_run(c: sqlite3.Connection, run_id: int, status: str,
                trips_checked: int, alerts: int, error: str | None) -> None:
-    from datetime import datetime
     c.execute(
         """UPDATE run_log SET finished_at=?, status=?,
            trips_checked=?, alerts_generated=?, error=? WHERE id=?""",
@@ -295,31 +345,23 @@ def percentile_rank(c: sqlite3.Connection, trip: str,
 
 # ── Heatmap / stats / trend ──────────────────────────────────────
 
-def heatmap_data(c: sqlite3.Connection, trip: str) -> list[dict]:
-    """Best price per (outbound_date, return_date) combo."""
+def heatmap_data(c: sqlite3.Connection, trip: str,
+                 days: int = 14) -> list[dict]:
+    """Best price per (outbound_date, return_date) combo, relevés récents."""
+    # Sans borne temporelle, une combinaison vue une seule fois à bas prix
+    # restait affichée comme la moins chère indéfiniment.
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
     rows = c.execute("""
         SELECT outbound_date, return_date, MIN(price_eur) AS best_eur,
+               MAX(check_date) AS last_seen,
                GROUP_CONCAT(DISTINCT airlines) AS airlines
         FROM checks
         WHERE trip_name = ? AND price_eur IS NOT NULL
           AND source NOT LIKE '%_ow'
+          AND check_date >= ?
         GROUP BY outbound_date, return_date
         ORDER BY outbound_date, return_date
-    """, (trip,)).fetchall()
-    return [dict(r) for r in rows]
-
-
-def day_of_week_stats(c: sqlite3.Connection, trip: str) -> list[dict]:
-    """Average price by day of week of check_date."""
-    rows = c.execute("""
-        SELECT CAST(strftime('%w', check_date) AS INTEGER) AS dow,
-               AVG(price_eur) AS avg_price, COUNT(*) AS n
-        FROM checks
-        WHERE trip_name = ? AND price_eur IS NOT NULL
-          AND source NOT LIKE '%_ow' AND source NOT LIKE '%_th'
-        GROUP BY dow
-        ORDER BY dow
-    """, (trip,)).fetchall()
+    """, (trip, cutoff)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -407,9 +449,11 @@ def trip_history_by_route(c: sqlite3.Connection, trip: str,
 
 def trip_breakdown(c: sqlite3.Connection, trip: str) -> list[dict]:
     """Best price per origin/destination, with source and dates."""
+    # MAX(c.check_date) : sans agrégat, SQLite prenait les colonnes nues
+    # (dates, compagnies, « vu le ») sur une ligne arbitraire du groupe.
     rows = c.execute("""
         SELECT c.origin, c.destination, c.price_eur AS best_eur,
-               c.check_date AS last_seen, c.airlines,
+               MAX(c.check_date) AS last_seen, c.airlines,
                c.outbound_date, c.return_date, c.booking_url, c.source
         FROM checks c
         INNER JOIN (
