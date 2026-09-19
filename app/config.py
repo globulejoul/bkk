@@ -1,6 +1,7 @@
 """Configuration loading and validation."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 # Chemins surchargeables par l'environnement : les défauts reproduisent
 # le montage Docker (aucune régression de déploiement), la surcharge rend
@@ -104,10 +107,29 @@ def _as_date(value: Any) -> date | None:
         return None
 
 
+def _window(t: dict, key: str) -> tuple[str, str]:
+    """Fenêtre [début, fin] garantie en deux chaînes 'YYYY-MM-DD'.
+
+    Une borne non citée dans config.yml arrive en `datetime.date`, et une
+    fenêtre malformée (scalaire, un seul élément) faisait planter load()
+    — donc toute l'API, pas seulement la période fautive. On renvoie une
+    fenêtre vide, traitée partout comme échue : la période est ignorée et
+    _config_errors a déjà dit pourquoi dans les logs.
+    """
+    w = t.get(key)
+    bornes = ((_as_date_str(w[0]), _as_date_str(w[1]))
+              if isinstance(w, (list, tuple)) and len(w) == 2
+              else ("", ""))
+    # Date passée plutôt que chaîne vide : seule la fenêtre ALLER est
+    # testée pour l'expiration, donc un retour vide arrivait jusqu'à
+    # date_range() qui levait sur strptime("") à chaque run.
+    return tuple(b or "1970-01-01" for b in bornes)  # type: ignore[return-value]
+
+
 def _warn_once(msg: str) -> None:
     if msg not in _warned:
         _warned.add(msg)
-        print(f"  ⚠ config: {msg}")
+        log.warning(f"  ⚠ config: {msg}")
 
 
 # ── Validation ───────────────────────────────────────────────
@@ -151,6 +173,13 @@ def _trip_errors(t: dict) -> list[str]:
     if out and ret and ret[1] <= out[0]:
         errs.append(f"Trip {name}: la fenêtre retour se termine ({ret[1]}) "
                     f"avant le premier aller ({out[0]})")
+
+    # min > max ne produit aucune combinaison de dates : la période
+    # devient muette run après run, sans le moindre message.
+    mn, mx = t.get("min_nights"), t.get("max_nights")
+    if isinstance(mn, int) and isinstance(mx, int) and mn > mx:
+        errs.append(f"Trip {name}: min_nights ({mn}) dépasse "
+                    f"max_nights ({mx}), aucun séjour possible")
     return errs
 
 
@@ -200,16 +229,46 @@ def _config_errors(data: dict) -> list[str]:
 # ── Lecture / écriture ───────────────────────────────────────
 
 
+# PyYAML ne sait pas conserver les commentaires : au premier
+# « Sauvegarder » depuis l'admin, config.yml perdait toute sa doc inline,
+# y compris l'unité des champs qui ne sont PAS éditables depuis l'admin.
+# On réécrit donc cet en-tête constant en tête du fichier à chaque
+# sauvegarde. Il documente ces champs-là ; la référence complète et
+# commentée reste config.example.yml.
+_HEADER = """\
+# ═══════════════════════════════════════════════════════════════
+# Bangkok Watch — config.yml
+#
+# CE FICHIER EST RÉGÉNÉRÉ par la page Admin : tout commentaire ajouté à
+# la main y sera effacé à la prochaine sauvegarde. Référence commentée :
+# config.example.yml.
+#
+# Éditable depuis l'admin : origins, destinations, adults, children,
+# max_fly_duration_hours, schedule_cron, trips, hotels.
+#
+# À éditer à la main uniquement (non exposés par l'admin) :
+#   currency / currencies  devise de référence et devises comparées
+#   rolling_window_days    fenêtre glissante du plus bas, en jours
+#   rise_threshold_pct     FRACTION, pas un pourcentage : 0.10 = +10 %
+#   ntfy.server / topic    le topic est un secret (lecture ET écriture)
+#
+# Les dates se mettent entre guillemets ("2026-10-14") : sans elles YAML
+# les résout en objets date.
+# ═══════════════════════════════════════════════════════════════
+
+"""
+
+
 def _dump(data: dict) -> str:
-    return yaml.dump(data, default_flow_style=False,
-                     allow_unicode=True, sort_keys=False)
+    return _HEADER + yaml.dump(data, default_flow_style=False,
+                               allow_unicode=True, sort_keys=False)
 
 
 def _read_yaml(path: Path) -> Any:
     try:
         return yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as e:
-        print(f"  ⚠ config: {path} illisible ({e})")
+        log.warning(f"  ⚠ config: {path} illisible ({e})")
         return None
 
 
@@ -233,7 +292,7 @@ def _read_config_data() -> dict:
 
     backup = _read_yaml(BACKUP_PATH) if BACKUP_PATH.exists() else None
     if _usable(backup):
-        print(f"  ⚠ config: {CONFIG_PATH} inexploitable, "
+        log.error(f"  ⚠ config: {CONFIG_PATH} inexploitable, "
               f"repli sur {BACKUP_PATH}")
         return backup
 
@@ -251,9 +310,8 @@ def load() -> Config:
     trips = [
         Trip(
             name=t["name"],
-            outbound_window=tuple(_as_date_str(d)
-                                  for d in t["outbound_window"]),
-            return_window=tuple(_as_date_str(d) for d in t["return_window"]),
+            outbound_window=_window(t, "outbound_window"),
+            return_window=_window(t, "return_window"),
             price_threshold=t.get("price_threshold"),
             min_nights=t.get("min_nights"),
             max_nights=t.get("max_nights"),
@@ -312,7 +370,7 @@ def _write_backup(content: str) -> None:
         os.replace(tmp, BACKUP_PATH)
     except OSError as e:
         # Une copie ratée n'est pas une raison de refuser une config valide.
-        print(f"  ⚠ config: sauvegarde {BACKUP_PATH} impossible ({e})")
+        log.warning(f"  ⚠ config: sauvegarde {BACKUP_PATH} impossible ({e})")
 
 
 def save_raw(data: dict) -> None:

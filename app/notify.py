@@ -1,11 +1,15 @@
 """ntfy notifications for flight price alerts."""
 from __future__ import annotations
 
+import logging
 import os
+from datetime import datetime
 
 import requests
 
 from app.config import Config
+
+log = logging.getLogger(__name__)
 
 
 def send_ntfy(cfg: Config, alert: dict) -> bool:
@@ -53,10 +57,10 @@ def send_ntfy(cfg: Config, alert: dict) -> bool:
         r = requests.post(url, data=body.encode("utf-8"),
                           headers=headers, timeout=15)
         if not r.ok:
-            print(f"  ntfy HTTP {r.status_code}: {r.text[:200]}")
+            log.info(f"  ntfy HTTP {r.status_code}: {r.text[:200]}")
         return r.ok
     except Exception as e:
-        print(f"  ntfy error: {e}")
+        log.error(f"  ntfy error: {e}")
         return False
 
 
@@ -230,10 +234,50 @@ def send_ops_ntfy(cfg: Config, title: str, body: str) -> bool:
         r = requests.post(url, data=body.encode("utf-8"),
                           headers=headers, timeout=15)
         if not r.ok:
-            print(f"  ntfy ops HTTP {r.status_code}: {r.text[:200]}")
+            log.info(f"  ntfy ops HTTP {r.status_code}: {r.text[:200]}")
         return r.ok
     except Exception as e:
-        print(f"  ntfy ops error: {e}")
+        log.error(f"  ntfy ops error: {e}")
+        return False
+
+
+def send_test_ntfy(cfg: Config) -> bool:
+    """Notification de vérification de la chaîne ntfy.
+
+    Seule une vraie alerte émettait jusqu'ici : un topic mal saisi ou un
+    token expiré ne se découvrait qu'à la première alerte manquée,
+    parfois des semaines après. Renvoie True si ntfy a accepté l'envoi.
+    """
+    if not cfg.ntfy.topic:
+        log.info("  ntfy test: aucun topic configuré")
+        return False
+    server = cfg.ntfy.server.rstrip("/")
+    url = f"{server}/{cfg.ntfy.topic}"
+    headers = {
+        "Title": "🔔 Test Bangkok Watch".encode("utf-8"),
+        "Tags": "bell",
+        "Priority": "default",
+        "Markdown": "yes",
+    }
+    token = os.environ.get("NTFY_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    # L'horodatage distingue ce test d'une notification restée affichée.
+    body = (
+        "**Test de notification**\n"
+        "Si tu lis ceci, le serveur, le topic et le token sont bons : "
+        "les alertes de prix arriveront ici.\n"
+        f"Serveur : {server}\n"
+        f"Envoyé le {datetime.now():%d/%m/%Y à %H:%M}"
+    )
+    try:
+        r = requests.post(url, data=body.encode("utf-8"),
+                          headers=headers, timeout=15)
+        if not r.ok:
+            log.info(f"  ntfy test HTTP {r.status_code}: {r.text[:200]}")
+        return r.ok
+    except Exception as e:
+        log.error(f"  ntfy test error: {e}")
         return False
 
 
@@ -275,8 +319,8 @@ def send_hotel_ntfy(cfg: Config, alert: dict) -> bool:
         r = requests.post(url, data="\n".join(body_lines).encode("utf-8"),
                           headers=headers, timeout=15)
         if not r.ok:
-            print(f"  ntfy hotel HTTP {r.status_code}: {r.text[:200]}")
+            log.info(f"  ntfy hotel HTTP {r.status_code}: {r.text[:200]}")
         return r.ok
     except Exception as e:
-        print(f"  ntfy hotel error: {e}")
+        log.error(f"  ntfy hotel error: {e}")
         return False

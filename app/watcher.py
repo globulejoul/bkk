@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
@@ -10,6 +11,8 @@ from typing import Any
 
 from app import db, fx, hotels, notify, sources
 from app.config import Config, HotelWatch, Trip
+
+log = logging.getLogger(__name__)
 
 
 # Même fenêtre que le dashboard (api.py appelle price_trend days=7) :
@@ -146,12 +149,12 @@ def run_once(cfg: Config) -> dict[str, Any]:
 
         for trip in cfg.trips:
             if not trip.enabled:
-                print(f"  ⏸ {trip.name}: désactivé, skip")
+                log.warning(f"  ⏸ {trip.name}: désactivé, skip")
                 continue
             # Une fenêtre aller entièrement passée n'est plus réservable :
             # chaque combo partait quand même vers Duffel (422 + quota).
             if trip.outbound_window[1] < tomorrow:
-                print(f"  🗓 {trip.name}: période échue, skip")
+                log.warning(f"  🗓 {trip.name}: période échue, skip")
                 summary["expired"].append(trip.name)
                 continue
             trips_active += 1
@@ -166,27 +169,27 @@ def run_once(cfg: Config) -> dict[str, Any]:
                     summary["errors"].append(f"{trip.name}: aucune donnée")
             except Exception as e:
                 summary["errors"].append(f"{trip.name}: {e}")
-                print(f"  ❌ {trip.name}: {e}")
+                log.error(f"  ❌ {trip.name}: {e}")
 
         # Hotel checks
         for hotel in cfg.hotels:
             if not hotel.enabled:
-                print(f"  ⏸ Hotel {hotel.name}: désactivé, skip")
+                log.warning(f"  ⏸ Hotel {hotel.name}: désactivé, skip")
                 continue
             if not hotel.checkin or not hotel.checkout:
-                print(f"  ⚠ Hotel {hotel.name}: dates manquantes, skip")
+                log.warning(f"  ⚠ Hotel {hotel.name}: dates manquantes, skip")
                 continue
             # Un séjour dont l'arrivée est passée ne peut plus être tarifé :
             # Google renvoyait alors un prix pour d'autres dates.
             if hotel.checkin < today:
-                print(f"  🗓 Hotel {hotel.name}: séjour échu, skip")
+                log.warning(f"  🗓 Hotel {hotel.name}: séjour échu, skip")
                 summary["expired"].append(f"Hotel {hotel.name}")
                 continue
             try:
                 _check_hotel(cfg, hotel, rates)
             except Exception as e:
                 summary["errors"].append(f"Hotel {hotel.name}: {e}")
-                print(f"  ❌ Hotel {hotel.name}: {e}")
+                log.error(f"  ❌ Hotel {hotel.name}: {e}")
 
         if trips_active and summary["trips_checked"] == 0:
             summary["status"] = "error"
@@ -296,7 +299,7 @@ def _check_trip(cfg: Config, trip: Trip,
     # bas » pour un séjour qui n'est pas celui qu'on surveille.
     combos = valid_combos(trip)
     if not combos:
-        print(f"  ⚠ {trip.name}: aucune combinaison réservable")
+        log.warning(f"  ⚠ {trip.name}: aucune combinaison réservable")
         return 0, 0
     out_dates = list(combos)
     ret_dates = sorted({r for rets in combos.values() for r in rets})
@@ -304,13 +307,13 @@ def _check_trip(cfg: Config, trip: Trip,
     out_mid, ret_mid = mid_combo(trip)
 
     # 1) Google Flights via fli (date médiane uniquement, scraping)
-    print(f"\n→ {trip.name}: fli {out_mid}/{ret_mid} + Duffel {nb_combos} combos dates")
+    log.info(f"\n→ {trip.name}: fli {out_mid}/{ret_mid} + Duffel {nb_combos} combos dates")
     ff_results = sources.search_google_flights_multi(
         origins=cfg.origins, destinations=cfg.destinations,
         outbound_date=out_mid, return_date=ret_mid,
         adults=cfg.adults, max_fly_h=cfg.max_fly_duration_hours,
     )
-    print(f"  Google Flights: {len(ff_results)} résultats (date médiane)")
+    log.info(f"  Google Flights: {len(ff_results)} résultats (date médiane)")
 
     # 2) Duffel. search_duffel croise les deux listes de dates : quand la
     # contrainte de durée écarte des combos, on l'appelle une fois par
@@ -332,7 +335,7 @@ def _check_trip(cfg: Config, trip: Trip,
                 adults=cfg.adults, currency=cfg.currency,
                 max_fly_h=cfg.max_fly_duration_hours,
             )
-    print(f"  Duffel: {len(duffel_results)} résultats ({nb_combos} combos dates)")
+    log.info(f"  Duffel: {len(duffel_results)} résultats ({nb_combos} combos dates)")
 
     return process_results(cfg, trip, ff_results + duffel_results, rates)
 
@@ -350,7 +353,7 @@ def flash_check_trip(cfg: Config, trip: Trip,
     if mids is None:
         return 0, 0
     out_mid, ret_mid = mids
-    print(f"  Flash {trip.name}: Duffel {out_mid}/{ret_mid}")
+    log.info(f"  Flash {trip.name}: Duffel {out_mid}/{ret_mid}")
     results = sources.search_duffel(
         origins=cfg.origins, destinations=cfg.destinations,
         outbound_dates=[out_mid], return_dates=[ret_mid],
@@ -374,7 +377,7 @@ def process_results(cfg: Config, trip: Trip,
     now = datetime.now().isoformat()
 
     if not results:
-        print(f"  ⚠ Aucun résultat pour {trip.name}")
+        log.warning(f"  ⚠ Aucun résultat pour {trip.name}")
         return 0, 0
 
     # Meilleur prix par paire (origine, destination)
@@ -389,7 +392,7 @@ def process_results(cfg: Config, trip: Trip,
             by_pair[key] = r
 
     if not by_pair:
-        print(f"  ⚠ Aucun prix convertible pour {trip.name}")
+        log.warning(f"  ⚠ Aucun prix convertible pour {trip.name}")
         return 0, 0
 
     best = min(by_pair.values(), key=lambda r: _to_eur(r, rates) or 1e9)
@@ -419,7 +422,7 @@ def process_results(cfg: Config, trip: Trip,
         # la référence à zéro, mais la table checks garde tout
         # l'historique des relevés.
         if state and state.get("config_hash") not in (None, cfg_hash):
-            print(f"  ♻ {trip.name}: paramètres modifiés, "
+            log.info(f"  ♻ {trip.name}: paramètres modifiés, "
                   f"référence d'alerte réinitialisée "
                   f"(historique des prix conservé)")
             state = {}
@@ -468,7 +471,7 @@ def process_results(cfg: Config, trip: Trip,
         if hit_threshold and not flash:
             flash_until = (datetime.now() + timedelta(hours=48)).isoformat()
             update["flash_until"] = flash_until
-            print(f"  ⚡ Flash mode activé jusqu'à {flash_until}")
+            log.info(f"  ⚡ Flash mode activé jusqu'à {flash_until}")
         elif flash and new_low:
             update["flash_until"] = (
                 datetime.now() + timedelta(hours=48)).isoformat()
@@ -483,13 +486,13 @@ def process_results(cfg: Config, trip: Trip,
         trend = _calc_trend(db.price_trend(c, trip.name, days=TREND_DAYS))
         rise_already_sent = _rise_alert_recent(c, trip.name)
     if pct is not None:
-        print(f"  Percentile: {pct:.0f}e (0=cheapest)")
-    print(f"  Tendance {TREND_DAYS}j: {trend['direction']} "
+        log.info(f"  Percentile: {pct:.0f}e (0=cheapest)")
+    log.info(f"  Tendance {TREND_DAYS}j: {trend['direction']} "
           f"({trend['change_pct']:+.1f}%)")
 
     buy_score = _calc_buy_score(best_price_eur, trip, pct, trend,
                                 lowest_eur=prev_low or best_price_eur)
-    print(f"  Score achat: {buy_score}/100")
+    log.info(f"  Score achat: {buy_score}/100")
 
     in_low_percentile = pct is not None and pct <= 10.0
 
@@ -530,9 +533,9 @@ def process_results(cfg: Config, trip: Trip,
             db.log_alert(c, trip.name, "new_low", best_price_eur, payload)
         alert_count += 1
         tag = "flash" if flash else "run"
-        print(f"  ⚠️  new_low alert sent ({best_price_eur:.0f}€, {tag})")
+        log.warning(f"  ⚠️  new_low alert sent ({best_price_eur:.0f}€, {tag})")
     elif rise and rise_already_sent:
-        print("  📈 hausse déjà notifiée il y a moins de 24 h, on se tait")
+        log.info("  📈 hausse déjà notifiée il y a moins de 24 h, on se tait")
     elif rise:
         payload = {
             "kind": "rise", "trip": trip.name,
@@ -552,7 +555,7 @@ def process_results(cfg: Config, trip: Trip,
         with db.conn() as c:
             db.log_alert(c, trip.name, "rise", best_price_eur, payload)
         alert_count += 1
-        print(f"  📈 rise alert sent ({best_price_eur:.0f}€)")
+        log.info(f"  📈 rise alert sent ({best_price_eur:.0f}€)")
 
     return len(by_pair), alert_count
 
@@ -590,7 +593,7 @@ def _compare_oneway(cfg: Config, best: sources.FlightResult,
     if rt_eur is None:
         return None
 
-    print(f"  Comparaison RT vs 2 OW pour {best.origin}→{best.destination}...")
+    log.info(f"  Comparaison RT vs 2 OW pour {best.origin}→{best.destination}...")
 
     # One-way outbound (best origin → best destination)
     ow_out = None
@@ -639,7 +642,7 @@ def _compare_oneway(cfg: Config, best: sources.FlightResult,
         ow_ret = duf_ret
 
     if ow_out is None or ow_ret is None:
-        print("  OW comparison: pas assez de données")
+        log.info("  OW comparison: pas assez de données")
         return None
 
     out_eur = _to_eur(ow_out, rates)
@@ -662,9 +665,9 @@ def _compare_oneway(cfg: Config, best: sources.FlightResult,
         "saving": saving,
     }
     if saving > 0:
-        print(f"  2 OW = {total_ow:.0f}€ vs RT {rt_eur:.0f}€ → économie {saving:.0f}€")
+        log.info(f"  2 OW = {total_ow:.0f}€ vs RT {rt_eur:.0f}€ → économie {saving:.0f}€")
     else:
-        print(f"  2 OW = {total_ow:.0f}€ vs RT {rt_eur:.0f}€ → RT moins cher")
+        log.info(f"  2 OW = {total_ow:.0f}€ vs RT {rt_eur:.0f}€ → RT moins cher")
     return result
 
 
@@ -687,7 +690,7 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
     if not thai_dests and not fr_origins:
         return None
 
-    print(f"  Open-jaw: recherche alternatives pour {best.origin}→{best.destination}...")
+    log.info(f"  Open-jaw: recherche alternatives pour {best.origin}→{best.destination}...")
 
     # L'aller est le même dans les deux stratégies : une seule requête au
     # lieu de trois, Duffel ne mettant rien en cache.
@@ -698,7 +701,7 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
     )
     out_eur = _to_eur(ow_out, rates) if ow_out else None
     if ow_out is None or not out_eur:
-        print("  Open-jaw: aller introuvable")
+        log.info("  Open-jaw: aller introuvable")
         return None
     time.sleep(1.0)
 
@@ -737,7 +740,7 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
                             "saving": rt_eur - total,
                         }
         except Exception as e:
-            print(f"  Open-jaw retour {alt_dest}→{best.origin} error: {e}")
+            log.error(f"  Open-jaw retour {alt_dest}→{best.origin} error: {e}")
 
     # Stratégie 2 : même aller, retour vers autre origine FR
     for alt_orig in fr_origins[:1]:
@@ -770,18 +773,18 @@ def _compare_openjaw(cfg: Config, best: sources.FlightResult,
                             "saving": rt_eur - total,
                         }
         except Exception as e:
-            print(f"  Open-jaw retour {best.destination}→{alt_orig} error: {e}")
+            log.error(f"  Open-jaw retour {best.destination}→{alt_orig} error: {e}")
 
     if best_oj:
         saving = best_oj["saving"]
         if saving > 0:
-            print(f"  Open-jaw = {best_oj_total:.0f}€ vs RT {rt_eur:.0f}€ "
+            log.info(f"  Open-jaw = {best_oj_total:.0f}€ vs RT {rt_eur:.0f}€ "
                   f"→ économie {saving:.0f}€")
         else:
-            print(f"  Open-jaw = {best_oj_total:.0f}€ vs RT {rt_eur:.0f}€ "
+            log.info(f"  Open-jaw = {best_oj_total:.0f}€ vs RT {rt_eur:.0f}€ "
                   f"→ RT moins cher")
     else:
-        print("  Open-jaw: aucune combinaison trouvée")
+        log.info("  Open-jaw: aucune combinaison trouvée")
 
     return best_oj
 
@@ -808,7 +811,7 @@ def _check_hotel(cfg: Config, hotel: HotelWatch,
         return
     nights = (checkout_dt - checkin_dt).days
 
-    print(f"\n→ Hotel {hotel.name}: {checkin} → {checkout} ({nights} nuits)")
+    log.info(f"\n→ Hotel {hotel.name}: {checkin} → {checkout} ({nights} nuits)")
 
     # Conversion injectée : hotels.py reste indépendant de fx.
     def _to_eur_local(amount: float, currency: str) -> float | None:
@@ -825,18 +828,18 @@ def _check_hotel(cfg: Config, hotel: HotelWatch,
             to_eur=_to_eur_local,
         )
     except hotels.HotelScrapeError as e:
-        print(f"  ❌ Hotel {hotel.name}: {e}")
+        log.error(f"  ❌ Hotel {hotel.name}: {e}")
         _record_hotel_failure(cfg, hotel, now, str(e))
         return
 
     if not result or not result.prices:
-        print(f"  ⚠ Aucun prix exploitable pour {hotel.name}")
+        log.warning(f"  ⚠ Aucun prix exploitable pour {hotel.name}")
         _record_hotel_failure(cfg, hotel, now, "aucun prix exploitable")
         return
 
     best_eur = result.best_price_eur
     if best_eur is None:
-        print(f"  ⚠ {hotel.name}: prix non convertibles en EUR")
+        log.warning(f"  ⚠ {hotel.name}: prix non convertibles en EUR")
         _record_hotel_failure(cfg, hotel, now, "prix non convertibles en EUR")
         return
 
@@ -864,7 +867,7 @@ def _check_hotel(cfg: Config, hotel: HotelWatch,
         # raisonnement que pour les vols, on repart d'une référence
         # neuve sans toucher à l'historique des relevés.
         if state and state.get("config_hash") not in (None, h_hash):
-            print(f"  ♻ Hotel {hotel.name}: dates modifiées, "
+            log.info(f"  ♻ Hotel {hotel.name}: dates modifiées, "
                   f"référence d'alerte réinitialisée")
             state = {}
         prev_low = state.get("lowest_price_eur")
@@ -904,7 +907,7 @@ def _check_hotel(cfg: Config, hotel: HotelWatch,
         db.upsert_hotel_state(c, hotel.name, hotel.name, **update)
 
     if not should_alert:
-        print(f"  🏨 {best_eur:.0f}€ ({result.best_source}) — pas d'alerte")
+        log.info(f"  🏨 {best_eur:.0f}€ ({result.best_source}) — pas d'alerte")
         return
 
     payload = {
@@ -926,7 +929,7 @@ def _check_hotel(cfg: Config, hotel: HotelWatch,
         db.log_alert(c, hotel.name, "hotel_low", best_eur, payload)
     tag = "🎯 SEUIL" if hit_threshold else "📉 BAS"
     status = "" if delivered else " (ntfy KO)"
-    print(f"  🏨 {tag} Hotel alert: {best_eur:.0f}€ "
+    log.info(f"  🏨 {tag} Hotel alert: {best_eur:.0f}€ "
           f"({result.best_source}){status}")
 
 

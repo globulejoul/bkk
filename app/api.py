@@ -10,15 +10,19 @@ Routes:
   /api/alerts  -> recent alerts
   /api/runs    -> last runs
   /api/run-now -> trigger immediate check (POST)
+  /api/test-notification -> send a test ntfy push (POST, admin)
 """
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import threading
-from contextlib import asynccontextmanager
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,9 +31,18 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from app import config, db, watcher
+from app import config, db, notify, watcher
+
+log = logging.getLogger(__name__)
+
+# fcntl n'existe pas sous Windows (dev local) : on y retombe sur le seul
+# verrou mémoire, ce qui suffit puisqu'il n'y a pas de conteneur.
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -56,6 +69,66 @@ DAYS_MAX = 36500
 # Transparency, donc « URL non devinable » n'est pas une protection.
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
+# `docker compose exec watcher python -m app run` tourne dans un AUTRE
+# processus que le scheduler : le threading.Lock ne l'y voit pas, d'où
+# deux runs simultanés. Un fichier posé à côté de la base sert d'arbitre
+# commun aux deux processus.
+RUN_LOCK_PATH = db.DB_PATH.parent / "run.lock"
+# flock est attaché au descripteur ouvert, pas au processus : si le thread
+# d'un run bloqué garde le sien, le watchdog a beau libérer le verrou
+# mémoire, tout run suivant se heurte au verrou fichier de son propre
+# processus. On garde donc la référence pour pouvoir la fermer de force.
+_run_lock_fh: Any = None
+
+
+def _release_file_lock() -> None:
+    """Ferme le descripteur du verrou fichier, donc libère le flock."""
+    global _run_lock_fh
+    fh, _run_lock_fh = _run_lock_fh, None
+    if fh is not None:
+        try:
+            fh.close()
+        except (OSError, ValueError):
+            pass
+
+
+@contextmanager
+def file_run_lock() -> Iterator[bool]:
+    """Verrou inter-processus. Cède True s'il a été obtenu, False sinon."""
+    global _run_lock_fh
+    if fcntl is None:
+        yield True
+        return
+    try:
+        RUN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(RUN_LOCK_PATH, "w")
+    except OSError as e:
+        # Mieux vaut un run sans garde inter-process qu'un run refusé.
+        log.warning(f"Verrou fichier indisponible ({e}), run sans garde inter-process")
+        yield True
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            fh.close()
+        except (OSError, ValueError):
+            pass
+        yield False
+        return
+    _run_lock_fh = fh
+    try:
+        yield True
+    finally:
+        # _release_file_lock a pu être appelé entre-temps par le watchdog.
+        if _run_lock_fh is fh:
+            _release_file_lock()
+        else:
+            try:
+                fh.close()
+            except (OSError, ValueError):
+                pass
+
 
 def require_admin(
     x_admin_password: str | None = Header(default=None),
@@ -72,16 +145,20 @@ def require_admin(
 def _run_safe() -> None:
     global _run_started_at
     if not _run_lock.acquire(blocking=False):
-        print("Skip: previous run still in progress")
+        log.warning("Skip: previous run still in progress")
         return
     run_token = datetime.now()
     _run_started_at = run_token
     try:
-        cfg = config.load()
-        result = watcher.run_once(cfg)
-        print(f"Run complete: {result}")
+        with file_run_lock() as acquired:
+            if not acquired:
+                log.warning("Skip: un run tourne déjà dans un autre processus")
+                return
+            cfg = config.load()
+            result = watcher.run_once(cfg)
+            log.info(f"Run complete: {result}")
     except Exception as e:
-        print(f"Run error: {e}")
+        log.error(f"Run error: {e}")
     finally:
         # Ne release que si c'est toujours NOTRE run
         # (le watchdog a pu release + un autre run a pu prendre le lock)
@@ -102,7 +179,7 @@ def _cleanup_stale_runs() -> None:
             "WHERE status='running'"
         ).rowcount
         if stale:
-            print(f"Cleaned up {stale} stale run(s)")
+            log.info(f"Cleaned up {stale} stale run(s)")
 
 
 def _watchdog() -> None:
@@ -113,7 +190,7 @@ def _watchdog() -> None:
     elapsed = (datetime.now() - _run_started_at).total_seconds()
     if elapsed < RUN_TIMEOUT:
         return
-    print(f"WATCHDOG: run bloqué depuis {elapsed:.0f}s (>{RUN_TIMEOUT}s), nettoyage forcé")
+    log.error(f"WATCHDOG: run bloqué depuis {elapsed:.0f}s (>{RUN_TIMEOUT}s), nettoyage forcé")
     with db.conn() as c:
         now_iso = datetime.now().isoformat()
         c.execute(
@@ -122,6 +199,9 @@ def _watchdog() -> None:
             (now_iso, f"Watchdog timeout after {elapsed:.0f}s"),
         )
     _run_started_at = None
+    # Le thread bloqué garde son descripteur ouvert : sans cette
+    # fermeture, le flock survit au reset et bloque tous les runs suivants.
+    _release_file_lock()
     try:
         _run_lock.release()
     except RuntimeError:
@@ -145,40 +225,46 @@ def _flash_check() -> None:
     if not trips_in_flash:
         return
 
-    print(f"Flash mode: {len(trips_in_flash)} trip(s) en flash — "
+    log.info(f"Flash mode: {len(trips_in_flash)} trip(s) en flash — "
           f"{', '.join(trips_in_flash)}")
 
     if not _run_lock.acquire(blocking=False):
         return
     try:
-        from app import fx
-        cfg = config.load()
-        rates = fx.fetch_rates(cfg.currency, ["THB"])
-        by_name = {t.name: t for t in cfg.trips}
-        for trip_name in trips_in_flash:
-            trip = by_name.get(trip_name)
-            # Une période désactivée dans l'admin continuait d'être
-            # interrogée toutes les 5 min jusqu'à expiration du flash.
-            if not trip or not trip.enabled:
-                continue
-            # Le flash dure 48 h : sans ce filtre il continuait d'interroger
-            # une période dont la fenêtre venait d'expirer, avec une date
-            # de départ passée. Même borne que run_once.
-            if trip.outbound_window[1] < datetime.now().date().isoformat():
-                continue
-            # Relevé allégé (Duffel, date médiane) mais passé dans la
-            # même chaîne que le run complet : les prix sont enregistrés
-            # et un nouveau plus bas déclenche bien une alerte.
-            try:
-                rows, alerts = watcher.flash_check_trip(cfg, trip, rates)
-            except Exception as e:
-                print(f"  Flash {trip_name}: échec — {e}")
-                continue
-            if rows:
-                print(f"  Flash {trip_name}: {rows} lignes enregistrées, "
-                      f"{alerts} alerte(s)")
+        with file_run_lock() as acquired:
+            if not acquired:
+                # Un run en ligne de commande écrit dans les mêmes tables :
+                # le flash doit respecter le même arbitre inter-processus.
+                log.info("Flash: un run tourne déjà dans un autre processus")
+                return
+            from app import fx
+            cfg = config.load()
+            rates = fx.fetch_rates(cfg.currency, ["THB"])
+            by_name = {t.name: t for t in cfg.trips}
+            for trip_name in trips_in_flash:
+                trip = by_name.get(trip_name)
+                # Une période désactivée dans l'admin continuait d'être
+                # interrogée toutes les 5 min jusqu'à expiration du flash.
+                if not trip or not trip.enabled:
+                    continue
+                # Le flash dure 48 h : sans ce filtre il continuait d'interroger
+                # une période dont la fenêtre venait d'expirer, avec une date
+                # de départ passée. Même borne que run_once.
+                if trip.outbound_window[1] < datetime.now().date().isoformat():
+                    continue
+                # Relevé allégé (Duffel, date médiane) mais passé dans la
+                # même chaîne que le run complet : les prix sont enregistrés
+                # et un nouveau plus bas déclenche bien une alerte.
+                try:
+                    rows, alerts = watcher.flash_check_trip(cfg, trip, rates)
+                except Exception as e:
+                    log.error(f"  Flash {trip_name}: échec — {e}")
+                    continue
+                if rows:
+                    log.info(f"  Flash {trip_name}: {rows} lignes enregistrées, "
+                          f"{alerts} alerte(s)")
     except Exception as e:
-        print(f"Flash check error: {e}")
+        log.error(f"Flash check error: {e}")
     finally:
         _run_lock.release()
 
@@ -187,7 +273,7 @@ def _on_job_skipped(event) -> None:
     """Trace les occurrences perdues : sinon les trous d'historique sont muets."""
     reason = ("run précédent encore en cours"
               if event.code == EVENT_JOB_MAX_INSTANCES else "misfire")
-    print(f"Scheduler: occurrence sautée ({event.job_id}) — {reason}")
+    log.info(f"Scheduler: occurrence sautée ({event.job_id}) — {reason}")
 
 
 def _next_run_iso() -> str | None:
@@ -230,11 +316,16 @@ async def lifespan(app: FastAPI):
                            EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES)
     scheduler.start()
     flash_txt = "flash 5min" if flash_on else "flash OFF (pas de clé Duffel)"
-    print(f"Scheduler started: {cfg.schedule_cron} + {flash_txt} "
+    log.error(f"Scheduler started: {cfg.schedule_cron} + {flash_txt} "
           f"+ watchdog every 2min")
     yield
+    # Sans cette trace, un SIGKILL après le délai de grâce était
+    # indiscernable d'un crash dans les logs du conteneur.
+    en_cours = "OUI (sera coupé net)" if _run_lock.locked() else "non"
+    log.info(f"Arrêt demandé : scheduler stoppé, run en cours : {en_cours}")
     if scheduler:
         scheduler.shutdown(wait=False)
+    log.info("Arrêt terminé.")
 
 
 # Sans auth devant, /docs offrait un formulaire « Try it out » sur
@@ -251,7 +342,10 @@ app = FastAPI(
 
 @app.get("/")
 async def root():
-    return FileResponse(STATIC_DIR / "index.html")
+    # Sans cet en-tête le document sort du cache heuristique du
+    # navigateur et le nouveau ?v= des assets n'est jamais lu.
+    return FileResponse(STATIC_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @app.get("/robots.txt")
@@ -269,12 +363,16 @@ def get_trips():
         summary = db.trips_summary(c)
     # Enrich with config (threshold, dates)
     by_name = {t.name: t for t in cfg.trips}
+    # Une période retirée ou renommée laissait une carte fantôme définitive,
+    # sans seuil ni fenêtres, avec son dernier prix figé. Les relevés
+    # restent en base : seul l'affichage est filtré.
+    summary = [s for s in summary if s["trip_name"] in by_name]
     for s in summary:
-        t = by_name.get(s["trip_name"])
-        if t:
-            s["threshold"] = t.price_threshold
-            s["outbound_window"] = t.outbound_window
-            s["return_window"] = t.return_window
+        t = by_name[s["trip_name"]]
+        s["threshold"] = t.price_threshold
+        s["outbound_window"] = t.outbound_window
+        s["return_window"] = t.return_window
+        s["enabled"] = t.enabled
     # Also add trips that exist in config but have no data yet
     have = {s["trip_name"] for s in summary}
     for t in cfg.trips:
@@ -283,9 +381,11 @@ def get_trips():
                 "trip_name": t.name,
                 "current_best": None, "all_time_low": None,
                 "all_time_high": None, "avg_30d": None,
-                "last_check_at": None, "threshold": t.price_threshold,
+                "last_check_at": None, "last_captured_at": None,
+                "threshold": t.price_threshold,
                 "outbound_window": t.outbound_window,
                 "return_window": t.return_window,
+                "enabled": t.enabled,
             })
     # Sort by outbound date
     summary.sort(key=lambda s: s.get("outbound_window", ["9999"])[0])
@@ -423,8 +523,9 @@ async def run_now():
             ).fetchone()
         if not row:
             # Lock fantôme : aucun run en cours en base, on force le reset
-            print("run-now: lock fantôme détecté, reset forcé")
+            log.info("run-now: lock fantôme détecté, reset forcé")
             _run_started_at = None
+            _release_file_lock()
             try:
                 _run_lock.release()
             except RuntimeError:
@@ -462,6 +563,25 @@ def get_admin_config():
     return {k: v for k, v in data.items() if k != "ntfy"}
 
 
+class TripUpdate(BaseModel):
+    """Période éditable depuis l'admin.
+
+    Typée (au lieu d'un dict libre) pour que min_nights/max_nights soient
+    bornés côté serveur : une contrainte absurde ne produit aucune
+    combinaison de dates et rend la période muette. `extra=allow` garde
+    les clés que l'admin n'expose pas encore.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1, max_length=80)
+    outbound_window: list[str] | None = Field(default=None, max_length=2)
+    return_window: list[str] | None = Field(default=None, max_length=2)
+    price_threshold: float | None = Field(default=None, ge=0, le=100000)
+    min_nights: int | None = Field(default=None, ge=1, le=365)
+    max_nights: int | None = Field(default=None, ge=1, le=365)
+    enabled: bool = True
+
+
 class ConfigUpdate(BaseModel):
     # Bornes serveur : le garde min/max du navigateur ne protégeait rien.
     # adults=10**9 remplissait la mémoire du conteneur, adults=0 coupait
@@ -472,24 +592,28 @@ class ConfigUpdate(BaseModel):
     children: list[int] | None = Field(default=None, max_length=8)
     max_fly_duration_hours: int | None = Field(default=None, ge=6, le=48)
     schedule_cron: str | None = Field(default=None, max_length=64)
-    trips: list[dict] | None = Field(default=None, max_length=20)
+    trips: list[TripUpdate] | None = Field(default=None, max_length=20)
     hotels: list[dict] | None = Field(default=None, max_length=20)
 
 
 @app.put("/api/admin/config", dependencies=[Depends(require_admin)])
 def update_admin_config(body: ConfigUpdate):
     """Update config.yml with new values."""
-    # Un cron invalide faisait échouer from_crontab APRÈS remove_job :
-    # le job disparaissait et plus rien n'était planifié.
+    data = config.load_raw()
+    # L'admin renvoie la config entière : le cron était donc reprogrammé
+    # (remove + add) à chaque sauvegarde, même inchangé. On ne touche au
+    # scheduler que si l'expression a réellement bougé, et le trigger est
+    # construit AVANT toute modification : un cron invalide faisait
+    # échouer from_crontab après coup, laissant le job supprimé.
     new_trigger = None
-    if body.schedule_cron is not None:
+    if body.schedule_cron is not None \
+            and body.schedule_cron != data.get("schedule_cron"):
         try:
             new_trigger = CronTrigger.from_crontab(body.schedule_cron,
                                                    timezone=SCHED_TZ)
         except ValueError as e:
             raise HTTPException(status_code=422,
                                 detail=f"Cron invalide : {e}")
-    data = config.load_raw()
     data["origins"] = [o.strip().upper() for o in body.origins if o.strip()]
     data["destinations"] = [d.strip().upper() for d in body.destinations if d.strip()]
     if body.adults is not None:
@@ -501,7 +625,9 @@ def update_admin_config(body: ConfigUpdate):
     if body.schedule_cron is not None:
         data["schedule_cron"] = body.schedule_cron
     if body.trips is not None:
-        data["trips"] = body.trips
+        # exclude_none : un seuil ou un nombre de nuits effacé disparaît du
+        # YAML au lieu d'y écrire `null`.
+        data["trips"] = [t.model_dump(exclude_none=True) for t in body.trips]
     if body.hotels is not None:
         data["hotels"] = body.hotels
     try:
@@ -515,10 +641,21 @@ def update_admin_config(body: ConfigUpdate):
                               max_instances=1, coalesce=True,
                               misfire_grace_time=MISFIRE_GRACE,
                               replace_existing=True)
-            print(f"Scheduler rescheduled: {body.schedule_cron}")
+            log.info(f"Scheduler rescheduled: {body.schedule_cron}")
         except Exception as e:
-            print(f"Reschedule error: {e}")
+            log.error(f"Reschedule error: {e}")
     return {"status": "ok"}
+
+
+@app.post("/api/test-notification", dependencies=[Depends(require_admin)])
+def test_notification() -> dict:
+    """Envoie une notification de test.
+
+    Le topic ntfy n'est vérifiable qu'au moment d'une vraie alerte :
+    une erreur de saisie restait invisible pendant des semaines.
+    """
+    cfg = config.load()
+    return {"sent": notify.send_test_ntfy(cfg)}
 
 
 # ── Hotels API ───────────────────────────────────────────────

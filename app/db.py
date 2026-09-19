@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
+
+log = logging.getLogger(__name__)
 
 DB_PATH = Path("/app/data/prices.db")
 
@@ -198,7 +201,7 @@ def _apply_migration(c: sqlite3.Connection, version: int, sql: str) -> None:
         except sqlite3.Error:
             pass
         raise
-    print(f"DB migration: applied v{version}")
+    log.info(f"DB migration: applied v{version}")
 
 
 def init() -> None:
@@ -223,7 +226,7 @@ def init() -> None:
                 (1, datetime.now().isoformat()),
             )
             cur = 1
-            print("DB migration: existing database tagged as v1")
+            log.info("DB migration: existing database tagged as v1")
 
         # Apply pending migrations
         for version, sql in MIGRATIONS:
@@ -337,7 +340,7 @@ def percentile_rank(c: sqlite3.Connection, trip: str,
     rows = c.execute("""
         SELECT DISTINCT price_eur FROM checks
         WHERE trip_name = ? AND price_eur IS NOT NULL
-          AND source NOT LIKE '%_th'
+          AND source NOT LIKE '%\\_th' ESCAPE '\\'
         ORDER BY price_eur
     """, (trip,)).fetchall()
     prices = [r[0] for r in rows]
@@ -364,7 +367,7 @@ def heatmap_data(c: sqlite3.Connection, trip: str,
                GROUP_CONCAT(DISTINCT airlines) AS airlines
         FROM checks
         WHERE trip_name = ? AND price_eur IS NOT NULL
-          AND source NOT LIKE '%_ow'
+          AND source NOT LIKE '%\\_ow' ESCAPE '\\'
           AND check_date >= ?
         GROUP BY outbound_date, return_date
         ORDER BY outbound_date, return_date
@@ -380,7 +383,7 @@ def price_trend(c: sqlite3.Connection, trip: str,
         SELECT check_date, MIN(price_eur) AS min_price
         FROM checks
         WHERE trip_name = ? AND price_eur IS NOT NULL
-          AND source NOT LIKE '%_ow' AND source NOT LIKE '%_th'
+          AND source NOT LIKE '%\\_ow' ESCAPE '\\' AND source NOT LIKE '%\\_th' ESCAPE '\\'
           AND check_date >= ?
         GROUP BY check_date
         ORDER BY check_date
@@ -391,8 +394,37 @@ def price_trend(c: sqlite3.Connection, trip: str,
 # ── Queries for the API ──────────────────────────────────────────
 
 def trips_summary(c: sqlite3.Connection) -> list[dict]:
-    """Per-trip overview: best ever, current, last check."""
+    """Per-trip overview: best ever, current, last check.
+
+    Les agrégats portent sur les MEILLEURS prix par relevé et non sur
+    toutes les paires : « moy 30j » et « haut » incluaient des liaisons
+    hors sujet, ce qui faisait paraître n'importe quel prix avantageux.
+    Un seul regroupement en CTE, puis jointure : en sous-requêtes
+    corrélées, chacune rebalayait `checks` pour chaque période.
+    Le `_` de LIKE est un joker : il est échappé, sinon le filtre exclut
+    tout ce qui finit par « ow » ou « th ».
+    """
     rows = c.execute("""
+        WITH runs AS (
+            SELECT trip_name,
+                   captured_at,
+                   MAX(check_date) AS check_date,
+                   MIN(price_eur)  AS m
+            FROM checks
+            WHERE price_eur IS NOT NULL
+              AND source NOT LIKE '%\\_ow' ESCAPE '\\'
+              AND source NOT LIKE '%\\_th' ESCAPE '\\'
+            GROUP BY trip_name, captured_at
+        ),
+        agg AS (
+            SELECT trip_name,
+                   MAX(captured_at) AS last_captured_at,
+                   MAX(m)           AS all_time_high,
+                   AVG(CASE WHEN check_date >= date('now', '-30 days')
+                            THEN m END) AS avg_30d
+            FROM runs
+            GROUP BY trip_name
+        )
         SELECT
             s.trip_name,
             s.lowest_price_eur AS all_time_low,
@@ -401,26 +433,21 @@ def trips_summary(c: sqlite3.Connection) -> list[dict]:
             s.lowest_destination,
             s.lowest_booking_url,
             s.last_check_at,
-            (
-                SELECT MIN(price_eur) FROM checks
-                WHERE trip_name = s.trip_name
-                AND check_date = (SELECT MAX(check_date) FROM checks
-                                  WHERE trip_name = s.trip_name)
-            ) AS current_best,
-            (
-                SELECT AVG(price_eur) FROM checks
-                WHERE trip_name = s.trip_name
-                AND check_date >= date('now', '-30 days')
-            ) AS avg_30d,
-            (
-                SELECT MAX(price_eur) FROM checks
-                WHERE trip_name = s.trip_name
-            ) AS all_time_high
+            a.last_captured_at,
+            a.avg_30d,
+            a.all_time_high,
+            -- Prix du DERNIER relevé, pas le minimum de la journée :
+            -- sinon un prix vu à 6 h puis disparu restait affiché jusqu'à
+            -- minuit alors que le graphique et la notification
+            -- « Hausse » annonçaient autre chose.
+            (SELECT r.m FROM runs r
+              WHERE r.trip_name = s.trip_name
+                AND r.captured_at = a.last_captured_at) AS current_best
         FROM state s
+        LEFT JOIN agg a ON a.trip_name = s.trip_name
         ORDER BY s.trip_name
     """).fetchall()
     return [dict(r) for r in rows]
-
 
 def trip_history(c: sqlite3.Connection, trip: str,
                  days: int = 60) -> list[dict]:

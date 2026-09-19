@@ -23,6 +23,10 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     restart: unless-stopped
+    # Un run (vols + Chromium hotels) dure plusieurs minutes : 10 s de grace
+    # par defaut, c'est un SIGKILL a chaque restart. 30 s laissent au moins
+    # l'arret du scheduler et la fermeture des navigateurs se terminer.
+    stop_grace_period: 30s
     # Python en PID 1 ne moissonne pas les processus zombies laisses par Chromium.
     init: true
     # VPS partage : un Chromium qui fuit ne doit pas pouvoir OOM-killer les autres projets.

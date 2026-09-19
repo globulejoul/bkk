@@ -5,6 +5,9 @@
 <title>✈ Bangkok Watch</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex, nofollow, noarchive, nosnippet">
+<!-- Le cache du document lui-meme est gere par l en-tete HTTP
+     Cache-Control: no-cache pose par la route GET / (app/api.py) : les
+     meta http-equiv correspondantes sont ignorees par les navigateurs. -->
 <!-- CSP en meta : FastAPI ne pose aucun header de securite, et le reverse proxy
      n'est pas garanti. Liste blanche exacte des origines reellement utilisees. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.open-meteo.com; object-src 'none'; base-uri 'self'; form-action 'self'">
@@ -21,7 +24,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"
         integrity="sha384-cVMg8E3QFwTvGCDuK+ET4PD341jF3W8nO1auiXfuZNQkzbUUiBGLsIQUE+b1mxws"
         crossorigin="anonymous"></script>
-<link rel="stylesheet" href="/static/styles.css?v=19">
+<link rel="stylesheet" href="/static/styles.css?v=20">
 </head>
 <body>
 <header>
@@ -204,12 +207,16 @@
       <div class="admin-card admin-wide admin-actions">
         <button id="admin-save" class="btn-save">Sauvegarder</button>
         <span id="admin-status" class="dim"></span>
+        <!-- Verifier la chaine ntfy sans attendre une vraie alerte : une
+             notification muette se diagnostiquait jusqu'ici dans les logs. -->
+        <button id="admin-test-notif" type="button">Tester la notification</button>
+        <span id="admin-test-notif-status" class="dim"></span>
       </div>
     </div>
   </section>
 </main>
 
 
-<script src="/static/app.js?v=19"></script>
+<script src="/static/app.js?v=20"></script>
 </body>
 </html>

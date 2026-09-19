@@ -1,9 +1,12 @@
 """Currency conversion via free ECB feeds."""
 from __future__ import annotations
 
+import logging
 import time
 
 import requests
+
+log = logging.getLogger(__name__)
 
 FRANKFURTER = "https://api.frankfurter.app/latest"
 ER_API = "https://open.er-api.com/v6/latest"
@@ -53,9 +56,9 @@ def fetch_rates(base: str, targets: list[str]) -> dict[str, float]:
     # Échec des deux sources : un taux périmé vaut mieux que « 1 EUR = 1 THB »,
     # qui faisait silencieusement passer des prix THB pour des euros.
     if hit:
-        print("  FX: sources indisponibles, taux en cache réutilisé")
+        log.warning("  FX: sources indisponibles, taux en cache réutilisé")
         return dict(hit[1])
-    print("  FX: aucun taux disponible, conversions non-EUR abandonnées")
+    log.error("  FX: aucun taux disponible, conversions non-EUR abandonnées")
     return {base: 1.0}
 
 

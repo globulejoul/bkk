@@ -30,6 +30,8 @@ const esc = (s) => {
 // pour le nombre 0 (âge d'un enfant, seuil à 0), d'où la conversion préalable.
 const attr = (v) => (v === null || v === undefined || v === '') ? '' : esc(String(v));
 
+// Au-dela, le prix affiche sur une carte periode n est plus courant.
+const TRIP_STALE_HOURS = 24;
 let tripChart = null;
 let _totalPax = 1; // nombre total de voyageurs, chargé au démarrage
 let _overviewDirty = false; // un rafraîchissement a été sauté (onglet masqué)
@@ -336,6 +338,27 @@ function buildTripCard(t) {
       <span class="score-badge"></span>
     </div>
   `;
+  // Une période désactivée n'est plus interrogée : la masquer ferait croire
+  // à une disparition, on la garde visible mais explicitement en pause.
+  // Un run qui ne ramene rien laisse la carte sur un releve ancien :
+  // sans ce reperage, un prix vieux de plusieurs jours passe pour courant.
+  const stamp = t.last_captured_at || t.last_check_at;
+  if (t.enabled !== false && stamp) {
+    const ageH = (Date.now() - _asDate(String(stamp)).getTime()) / 3600000;
+    if (ageH > TRIP_STALE_HOURS) {
+      const vieux = document.createElement('div');
+      vieux.className = 'hotel-status bad';
+      vieux.textContent = 'dernier releve il y a ' + Math.round(ageH) + ' h';
+      card.appendChild(vieux);
+    }
+  }
+  if (t.enabled === false) {
+    card.style.opacity = '0.55';
+    const pause = document.createElement('div');
+    pause.className = 'hotel-status dim';
+    pause.textContent = 'en pause';
+    card.appendChild(pause);
+  }
   return card;
 }
 
@@ -1618,6 +1641,17 @@ function renderTrips() {
           <span class="unit">\u20ac</span>
         </div>
       </div>
+      <div class="trip-edit-row">
+        <label for="trip-${idx}-minn">Dur\u00e9e</label>
+        <div class="input-unit">
+          <input type="number" min="1" max="365" id="trip-${idx}-minn" name="trip-${idx}-minn" data-trip="${idx}" data-field="min_nights" value="${attr(trip.min_nights)}" placeholder="min">
+        </div>
+        <span class="date-sep">\u00e0</span>
+        <div class="input-unit">
+          <input type="number" min="1" max="365" id="trip-${idx}-maxn" name="trip-${idx}-maxn" data-trip="${idx}" data-field="max_nights" value="${attr(trip.max_nights)}" placeholder="max">
+        </div>
+        <span class="dim">nuits \u2014 vide = sans contrainte</span>
+      </div>
     `;
     card.querySelectorAll('input[data-field]').forEach(input => {
       input.addEventListener('change', () => {
@@ -1628,6 +1662,12 @@ function renderTrips() {
         else if (f === 'rw0') t.return_window[0] = input.value;
         else if (f === 'rw1') t.return_window[1] = input.value;
         else if (f === 'threshold') t.price_threshold = input.value ? parseInt(input.value, 10) : null;
+        // Champ vide = pas de contrainte : on retire la clé plutôt que
+        // d'écrire un null qui polluerait config.yml.
+        else if (f === 'min_nights' || f === 'max_nights') {
+          if (input.value) t[f] = parseInt(input.value, 10);
+          else delete t[f];
+        }
       });
     });
     card.querySelector('input[data-trip-toggle]').addEventListener('change', (e) => {
@@ -1682,11 +1722,44 @@ async function saveConfig() {
   }
 }
 
+// Une notification qui n'arrive pas se diagnostiquait dans les logs du
+// conteneur : ce bouton exerce la chaîne ntfy depuis l'interface.
+async function testNotification() {
+  const btn = $('#admin-test-notif');
+  const status = $('#admin-test-notif-status');
+  btn.disabled = true;
+  status.style.color = '';
+  status.textContent = 'Envoi...';
+  try {
+    const r = await adminFetch('/api/test-notification', { method: 'POST' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(formatDetail(err.detail, `HTTP ${r.status}`));
+    }
+    // La route répond 200 même quand ntfy refuse : sans lire `sent`, un
+    // topic erroné s'afficherait comme un succès.
+    const data = await r.json().catch(() => ({}));
+    if (data.sent === false) throw new Error('ntfy a refusé (topic ou token ?)');
+    status.textContent = 'Notification envoyée';
+    status.style.color = 'var(--green)';
+  } catch (e) {
+    status.textContent = 'Échec : ' + e.message;
+    status.style.color = 'var(--rose)';
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => {
+      status.textContent = '';
+      status.style.color = '';
+    }, 8000);
+  }
+}
+
 // Admin button bindings
 $('#btn-add-origin').addEventListener('click', addOrigin);
 $('#btn-add-dest').addEventListener('click', addDestination);
 $('#admin-save').addEventListener('click', saveConfig);
 $('#btn-add-hotel').addEventListener('click', addHotel);
+$('#admin-test-notif').addEventListener('click', testNotification);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id === 'add-origin') addOrigin();
   if (e.key === 'Enter' && e.target.id === 'add-dest') addDestination();

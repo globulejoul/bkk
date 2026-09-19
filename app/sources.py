@@ -6,6 +6,7 @@ Duffel provides direct airline pricing (AF, Emirates, QR, EY...).
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 import time
@@ -15,6 +16,8 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
+
+log = logging.getLogger(__name__)
 
 
 # ─────────────────────────── Normalized result ────────────────────
@@ -120,14 +123,14 @@ def _search_fli(*, origin: str, destination: str,
         )
         from fli.search import SearchFlights
     except ImportError:
-        print("  fli not installed")
+        log.info("  fli not installed")
         return _empty_result(origin, destination, outbound_date,
                              return_date or "", "google_flights", label)
 
     orig_enum = _get_airport_enum(origin)
     dest_enum = _get_airport_enum(destination)
     if not orig_enum or not dest_enum:
-        print(f"  fli: unknown airport {origin} or {destination}")
+        log.info(f"  fli: unknown airport {origin} or {destination}")
         return _empty_result(origin, destination, outbound_date,
                              return_date or "", "google_flights", label)
 
@@ -171,7 +174,7 @@ def _search_fli(*, origin: str, destination: str,
         price = best.price
         currency = getattr(best, "currency", None) or _FLI_LOCALE["currency"]
         if currency != _FLI_LOCALE["currency"]:
-            print(f"  fli ({label}): prix en {currency} alors que "
+            log.info(f"  fli ({label}): prix en {currency} alors que "
                   f"{_FLI_LOCALE['currency']} était demandé")
         duration = getattr(best, "duration", 0) or 0  # minutes
         stops = getattr(best, "stops", 0) or 0
@@ -214,7 +217,7 @@ def _search_fli(*, origin: str, destination: str,
             source="google_flights", market_label=label, raw=best,
         )
     except Exception as e:
-        print(f"  fli ({label}) error: {e}")
+        log.error(f"  fli ({label}) error: {e}")
         return _empty_result(origin, destination, outbound_date,
                              return_date or "", "google_flights", label)
 
@@ -324,7 +327,7 @@ def _duffel_post(body: dict, *, tag: str, quota: dict[str, int]) -> dict | None:
         try:
             r = session.post(url, json=body, params=DUFFEL_PARAMS, timeout=30)
         except requests.RequestException as e:
-            print(f"  Duffel {tag}: réseau — {e} "
+            log.info(f"  Duffel {tag}: réseau — {e} "
                   f"({attempt}/{DUFFEL_MAX_ATTEMPTS})")
             time.sleep(2.0 * attempt)
             continue
@@ -342,7 +345,7 @@ def _duffel_post(body: dict, *, tag: str, quota: dict[str, int]) -> dict | None:
             try:
                 payload = r.json()
             except Exception:
-                print(f"  Duffel {tag}: réponse JSON illisible")
+                log.info(f"  Duffel {tag}: réponse JSON illisible")
                 return None
             data = payload.get("data") if isinstance(payload, dict) else None
             return data if isinstance(data, dict) else {}
@@ -355,22 +358,22 @@ def _duffel_post(body: dict, *, tag: str, quota: dict[str, int]) -> dict | None:
             # soutenu remplaçait les trous de la heatmap par un run entier
             # marqué « timeout » par le watchdog (RUN_TIMEOUT = 900 s).
             if quota.get("waited", 0) >= DUFFEL_WAIT_BUDGET_S:
-                print(f"  Duffel {tag}: budget d'attente épuisé, abandon")
+                log.error(f"  Duffel {tag}: budget d'attente épuisé, abandon")
                 return None
             wait = _duffel_reset_wait(r.headers.get("ratelimit-reset"))
             quota["waited"] = quota.get("waited", 0) + int(wait)
-            print(f"  Duffel {tag}: 429 — pause {wait:.0f}s "
+            log.info(f"  Duffel {tag}: 429 — pause {wait:.0f}s "
                   f"({attempt}/{DUFFEL_MAX_ATTEMPTS})")
             time.sleep(wait)
             continue
 
-        print(f"  Duffel {tag}: HTTP {r.status_code} — {r.text[:200]}")
+        log.info(f"  Duffel {tag}: HTTP {r.status_code} — {r.text[:200]}")
         if r.status_code >= 500:
             time.sleep(2.0 * attempt)
             continue
         return None  # 422 & co : retenter à l'identique ne changerait rien
 
-    print(f"  Duffel {tag}: abandon après {DUFFEL_MAX_ATTEMPTS} tentatives")
+    log.error(f"  Duffel {tag}: abandon après {DUFFEL_MAX_ATTEMPTS} tentatives")
     return None
 
 
@@ -437,7 +440,7 @@ def search_duffel(*, origins: list[str], destinations: list[str],
                         # synthétiques n'ont rien à faire en base.
                         if data is not None and data.get("live_mode") is False:
                             if not test_mode_warned:
-                                print("  ⚠ Duffel: token TEST (live_mode=false) — "
+                                log.warning("  ⚠ Duffel: token TEST (live_mode=false) — "
                                       "offres synthétiques ignorées")
                                 test_mode_warned = True
                             data = None
@@ -457,14 +460,14 @@ def search_duffel(*, origins: list[str], destinations: list[str],
                         _duffel_throttle(quota)
 
                 if done % 30 == 0:
-                    print(f"  Duffel: {done}/{total} "
+                    log.info(f"  Duffel: {done}/{total} "
                           f"({len(best_by_combo)} combos avec prix, "
                           f"quota restant: {quota.get('remaining')})")
     except _DuffelAuthError as e:
-        print(f"  ⚠ Duffel: clé refusée ({e}) — source abandonnée pour ce run")
+        log.error(f"  ⚠ Duffel: clé refusée ({e}) — source abandonnée pour ce run")
 
     if other_currencies:
-        print(f"  ⚠ Duffel: offres en {', '.join(sorted(other_currencies))} "
+        log.warning(f"  ⚠ Duffel: offres en {', '.join(sorted(other_currencies))} "
               f"et non en {currency} — non converties si le taux n'est pas chargé")
 
     results = sorted(best_by_combo.values(), key=lambda r: r.price or 1e9)
@@ -531,7 +534,7 @@ def _parse_duffel_offer(offer: dict, origin: str, destination: str,
             source="duffel",
         )
     except Exception as e:
-        print(f"  Duffel parse error: {e}")
+        log.error(f"  Duffel parse error: {e}")
         return None
 
 
@@ -556,12 +559,12 @@ def search_duffel_oneway(*, origin: str, destination: str,
         # Même client HTTP, même politique de retry/log que l'aller-retour.
         data = _duffel_post(body, tag=tag, quota={})
     except _DuffelAuthError as e:
-        print(f"  ⚠ Duffel {tag}: clé refusée ({e})")
+        log.warning(f"  ⚠ Duffel {tag}: clé refusée ({e})")
         return None
     if not data:
         return None
     if data.get("live_mode") is False:
-        print(f"  ⚠ Duffel {tag}: token TEST — offres ignorées")
+        log.warning(f"  ⚠ Duffel {tag}: token TEST — offres ignorées")
         return None
 
     try:
@@ -604,7 +607,7 @@ def search_duffel_oneway(*, origin: str, destination: str,
                 )
         return best
     except Exception as e:
-        print(f"  Duffel {tag} parse error: {e}")
+        log.error(f"  Duffel {tag} parse error: {e}")
         return None
 
 

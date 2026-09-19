@@ -10,6 +10,7 @@ lieu d'enregistrer une valeur douteuse.
 """
 from __future__ import annotations
 
+import logging
 import base64
 import re
 import threading
@@ -17,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
 from urllib.parse import parse_qs, quote_plus, urlparse
+
+log = logging.getLogger(__name__)
 
 
 class HotelScrapeError(RuntimeError):
@@ -101,7 +104,7 @@ def search_hotel(
             f"dates incohérentes ({checkin} → {checkout})")
     total_guests = adults + (len(children) if children else 0)
 
-    print(f"  Hotels: {hotel_name} {checkin}→{checkout} "
+    log.info(f"  Hotels: {hotel_name} {checkin}→{checkout} "
           f"({nights}n, {total_guests} guests)")
 
     return _scrape_with_timeout(
@@ -299,7 +302,7 @@ def extract_stay_total(page_text: str, nights: int) -> float | None:
         return None
     mn = _RE_STAY_NIGHTS.search(page_text)
     if mn and int(mn.group(1)) != nights:
-        print(f"  Hotels: ⚠ Google annonce {mn.group(1)} nuits "
+        log.warning(f"  Hotels: ⚠ Google annonce {mn.group(1)} nuits "
               f"au lieu de {nights}, montant refusé")
         return None
     try:
@@ -438,17 +441,17 @@ def _scrape_hotel(
         raise HotelScrapeError(
             f"dates non appliquées par Google ({checkin} → {checkout})")
     if applied is None:
-        print("  Hotels: ⚠ aucune date dans les liens, dates non vérifiables")
+        log.warning("  Hotels: ⚠ aucune date dans les liens, dates non vérifiables")
     result.dates_confirmed = bool(applied)
 
     result.prices = _extract_prices(anchors)
     _consolidate(result, to_eur)
 
-    print(f"  Hotels: total séjour {result.best_price_eur} € "
+    log.info(f"  Hotels: total séjour {result.best_price_eur} € "
           f"({nights} nuits, taxes comprises) — providers vus : "
           f"{', '.join(result.providers_seen) or 'aucun'}")
     if result.rejected:
-        print(f"  Hotels: écartés → {', '.join(result.rejected)}")
+        log.info(f"  Hotels: écartés → {', '.join(result.rejected)}")
 
     return result
 
