@@ -1,10 +1,20 @@
 """Currency conversion via free ECB feeds."""
 from __future__ import annotations
 
+import time
+
 import requests
 
 FRANKFURTER = "https://api.frankfurter.app/latest"
 ER_API = "https://open.er-api.com/v6/latest"
+
+
+# Les taux de change bougent de quelques dixièmes de pour cent par jour :
+# les rafraîchir plus souvent n'apporte rien et, avec le flash mode qui
+# tourne toutes les 5 minutes, cela ferait ~290 appels par jour vers
+# frankfurter depuis l'IP du VPS.
+_CACHE_TTL_S = 6 * 3600
+_cache: dict[tuple[str, tuple[str, ...]], tuple[float, dict[str, float]]] = {}
 
 
 def fetch_rates(base: str, targets: list[str]) -> dict[str, float]:
@@ -12,6 +22,11 @@ def fetch_rates(base: str, targets: list[str]) -> dict[str, float]:
     targets = [t for t in targets if t != base]
     if not targets:
         return {base: 1.0}
+
+    key = (base, tuple(sorted(targets)))
+    hit = _cache.get(key)
+    if hit and (time.monotonic() - hit[0]) < _CACHE_TTL_S:
+        return dict(hit[1])
     # Try Frankfurter
     try:
         r = requests.get(FRANKFURTER, params={
@@ -20,6 +35,7 @@ def fetch_rates(base: str, targets: list[str]) -> dict[str, float]:
         rates = r.json().get("rates", {})
         if rates:
             rates[base] = 1.0
+            _cache[key] = (time.monotonic(), dict(rates))
             return rates
     except Exception:
         pass
@@ -30,9 +46,17 @@ def fetch_rates(base: str, targets: list[str]) -> dict[str, float]:
         all_rates = r.json().get("rates", {})
         rates = {t: all_rates[t] for t in targets if t in all_rates}
         rates[base] = 1.0
+        _cache[key] = (time.monotonic(), dict(rates))
         return rates
     except Exception:
-        return {base: 1.0}
+        pass
+    # Échec des deux sources : un taux périmé vaut mieux que « 1 EUR = 1 THB »,
+    # qui faisait silencieusement passer des prix THB pour des euros.
+    if hit:
+        print("  FX: sources indisponibles, taux en cache réutilisé")
+        return dict(hit[1])
+    print("  FX: aucun taux disponible, conversions non-EUR abandonnées")
+    return {base: 1.0}
 
 
 def to_eur(amount: float, currency: str,

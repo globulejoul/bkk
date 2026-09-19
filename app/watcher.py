@@ -290,10 +290,7 @@ def mid_combo(trip: Trip) -> tuple[str, str] | None:
 
 def _check_trip(cfg: Config, trip: Trip,
                 rates: dict[str, float]) -> tuple[int, int]:
-    """Check one trip. Returns (lignes persistées, alertes envoyées)."""
-    today = date.today().isoformat()
-    now = datetime.now().isoformat()
-
+    """Relevé complet d'une période. Renvoie (lignes persistées, alertes)."""
     # Dates échues écartées et contraintes de durée appliquées : sans
     # elles un A/R de 0 ou 40 nuits pouvait devenir le « nouveau plus
     # bas » pour un séjour qui n'est pas celui qu'on surveille.
@@ -337,14 +334,52 @@ def _check_trip(cfg: Config, trip: Trip,
             )
     print(f"  Duffel: {len(duffel_results)} résultats ({nb_combos} combos dates)")
 
-    # 3) Fusionner et garder le best par paire (origin, dest)
-    all_results = ff_results + duffel_results
-    if not all_results:
+    return process_results(cfg, trip, ff_results + duffel_results, rates)
+
+
+def flash_check_trip(cfg: Config, trip: Trip,
+                     rates: dict[str, float]) -> tuple[int, int]:
+    """Relevé rapproché pendant la fenêtre flash : Duffel, date médiane.
+
+    Même chaîne de persistance et d'alerte que le run complet, mais en
+    mode flash : seul un nouveau plus bas notifie. Le seuil est atteint
+    par construction pendant un flash, alerter dessus toutes les 5 min
+    n'apprendrait rien.
+    """
+    mids = mid_combo(trip)
+    if mids is None:
+        return 0, 0
+    out_mid, ret_mid = mids
+    print(f"  Flash {trip.name}: Duffel {out_mid}/{ret_mid}")
+    results = sources.search_duffel(
+        origins=cfg.origins, destinations=cfg.destinations,
+        outbound_dates=[out_mid], return_dates=[ret_mid],
+        adults=cfg.adults, currency=cfg.currency,
+        max_fly_h=cfg.max_fly_duration_hours,
+    )
+    return process_results(cfg, trip, results, rates, flash=True)
+
+
+def process_results(cfg: Config, trip: Trip,
+                    results: list[sources.FlightResult],
+                    rates: dict[str, float],
+                    *, flash: bool = False) -> tuple[int, int]:
+    """Persiste les relevés, met à jour l'état et déclenche les alertes.
+
+    Partagée par le run complet et le flash : tant que le flash avait sa
+    propre logique (un simple print), ses relevés étaient perdus et aucun
+    creux repéré entre deux runs ne donnait d'alerte.
+    """
+    today = date.today().isoformat()
+    now = datetime.now().isoformat()
+
+    if not results:
         print(f"  ⚠ Aucun résultat pour {trip.name}")
         return 0, 0
 
+    # Meilleur prix par paire (origine, destination)
     by_pair: dict[tuple[str, str], sources.FlightResult] = {}
-    for r in all_results:
+    for r in results:
         key = (r.origin, r.destination)
         price_eur = _to_eur(r, rates)
         if price_eur is None:
@@ -357,20 +392,17 @@ def _check_trip(cfg: Config, trip: Trip,
         print(f"  ⚠ Aucun prix convertible pour {trip.name}")
         return 0, 0
 
-    # Best overall
     best = min(by_pair.values(), key=lambda r: _to_eur(r, rates) or 1e9)
     best_price_eur = _to_eur(best, rates)
 
-    # 4) Persist tous les résultats par paire
     with db.conn() as c:
         for r in by_pair.values():
-            price_eur_val = _to_eur(r, rates)
             db.insert_check(c, {
                 "check_date": today, "trip_name": trip.name,
                 "source": r.source,
                 "origin": r.origin, "destination": r.destination,
                 "price_local": r.price, "currency": r.currency,
-                "price_eur": price_eur_val,
+                "price_eur": _to_eur(r, rates),
                 "outbound_date": r.outbound_date,
                 "return_date": r.return_date,
                 "out_h": r.out_h, "ret_h": r.ret_h,
@@ -379,7 +411,6 @@ def _check_trip(cfg: Config, trip: Trip,
                 "captured_at": now,
             })
 
-        # 5) State update / alert detection
         state = db.get_state(c, trip.name) or {}
         cfg_hash = trip_config_hash(cfg, trip)
         # Changer les dates, les aéroports ou le nombre de voyageurs
@@ -394,9 +425,9 @@ def _check_trip(cfg: Config, trip: Trip,
             state = {}
         prev_low = state.get("lowest_price_eur")
         rolling = state.get("rolling") or []
-        # Plusieurs runs par jour : on garde le minimum de la journée.
-        # Sinon un creux vu le matin disparaissait dès le run suivant et
-        # la hausse +10 % ne se déclenchait jamais.
+        # Plusieurs relevés par jour : on garde le minimum de la journée.
+        # Sinon un creux vu le matin disparaissait dès le suivant et la
+        # hausse +10 % ne se déclenchait jamais.
         same_day = [x[1] for x in rolling
                     if x[0] == today and x[1] is not None]
         rolling = [x for x in rolling if x[0] != today]
@@ -421,7 +452,6 @@ def _check_trip(cfg: Config, trip: Trip,
                         "rise_pct": (best_price_eur / recent_low - 1) * 100,
                         "delta_eur": best_price_eur - recent_low}
 
-        # Persist state
         update: dict[str, Any] = {"rolling": rolling, "last_check_at": now,
                                   "config_hash": cfg_hash}
         if new_low or prev_low is None:
@@ -432,19 +462,23 @@ def _check_trip(cfg: Config, trip: Trip,
                 "lowest_destination": best.destination,
                 "lowest_booking_url": best.booking_url,
             })
-        # Flash mode : si seuil atteint, activer flash pendant 48h
-        if hit_threshold:
+        # Fenêtre flash : armée par le seuil lors d'un run complet,
+        # prolongée par un nouveau plus bas pendant le flash, puisque le
+        # prix continue de descendre.
+        if hit_threshold and not flash:
             flash_until = (datetime.now() + timedelta(hours=48)).isoformat()
             update["flash_until"] = flash_until
             print(f"  ⚡ Flash mode activé jusqu'à {flash_until}")
+        elif flash and new_low:
+            update["flash_until"] = (
+                datetime.now() + timedelta(hours=48)).isoformat()
         db.upsert_state(c, trip.name, **update)
 
     alert_count = 0
 
-    # 6) Percentile rank, tendance et anti-doublon « hausse »
     with db.conn() as c:
         pct = db.percentile_rank(c, trip.name, best_price_eur)
-        # 6b) Même source que le dashboard, sinon les deux affichaient des
+        # Même source que le dashboard, sinon les deux affichaient des
         # recommandations opposées pour le même prix.
         trend = _calc_trend(db.price_trend(c, trip.name, days=TREND_DAYS))
         rise_already_sent = _rise_alert_recent(c, trip.name)
@@ -453,30 +487,34 @@ def _check_trip(cfg: Config, trip: Trip,
     print(f"  Tendance {TREND_DAYS}j: {trend['direction']} "
           f"({trend['change_pct']:+.1f}%)")
 
-    # 6c) Buy score
     buy_score = _calc_buy_score(best_price_eur, trip, pct, trend,
                                 lowest_eur=prev_low or best_price_eur)
     print(f"  Score achat: {buy_score}/100")
 
-    # Alerte percentile : prix dans le 10e percentile historique
     in_low_percentile = pct is not None and pct <= 10.0
 
-    # 7) Alertes. Les comparaisons RT vs 2 OW et open-jaw coûtent ~10
-    # requêtes et 15 s de pauses : elles ne servent qu'au message « bas »,
-    # le payload « hausse » ne les contient pas.
-    if new_low or hit_threshold or in_low_percentile:
-        ow_comparison = _compare_oneway(cfg, best, rates)
-        oj_comparison = _compare_openjaw(cfg, best, rates)
+    # Pendant un flash, le seuil est atteint par construction et le prix
+    # est dans le bas de l'historique : n'alerter que sur un vrai record,
+    # sinon c'est une notification toutes les 5 minutes pendant 48 h.
+    low_alert = new_low if flash else (
+        new_low or hit_threshold or in_low_percentile)
 
-        kind = "new_low"
+    if low_alert:
+        # Les comparaisons A/R contre 2 allers simples et open-jaw coûtent
+        # une dizaine de requêtes et 15 s de pauses : exclues à la cadence
+        # du flash.
+        ow_comparison = None if flash else _compare_oneway(cfg, best, rates)
+        oj_comparison = None if flash else _compare_openjaw(cfg, best, rates)
+
         payload = {
-            "kind": kind, "trip": trip.name,
+            "kind": "new_low", "trip": trip.name,
             "price": best_price_eur,
             "previous_low": prev_low,
             "hit_threshold": hit_threshold,
             "percentile": pct,
             "trend": trend,
             "buy_score": buy_score,
+            "flash": flash,
             "origin": best.origin, "destination": best.destination,
             "outbound_date": best.outbound_date,
             "return_date": best.return_date,
@@ -489,9 +527,10 @@ def _check_trip(cfg: Config, trip: Trip,
         }
         notify.send_ntfy(cfg, payload)
         with db.conn() as c:
-            db.log_alert(c, trip.name, kind, best_price_eur, payload)
+            db.log_alert(c, trip.name, "new_low", best_price_eur, payload)
         alert_count += 1
-        print(f"  ⚠️  {kind} alert sent ({best_price_eur:.0f}€)")
+        tag = "flash" if flash else "run"
+        print(f"  ⚠️  new_low alert sent ({best_price_eur:.0f}€, {tag})")
     elif rise and rise_already_sent:
         print("  📈 hausse déjà notifiée il y a moins de 24 h, on se tait")
     elif rise:

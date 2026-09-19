@@ -151,8 +151,9 @@ def _flash_check() -> None:
     if not _run_lock.acquire(blocking=False):
         return
     try:
-        from app import sources
+        from app import fx
         cfg = config.load()
+        rates = fx.fetch_rates(cfg.currency, ["THB"])
         by_name = {t.name: t for t in cfg.trips}
         for trip_name in trips_in_flash:
             trip = by_name.get(trip_name)
@@ -165,21 +166,17 @@ def _flash_check() -> None:
             # de départ passée. Même borne que run_once.
             if trip.outbound_window[1] < datetime.now().date().isoformat():
                 continue
-            # Lightweight check: Duffel only, mid-date only
-            mids = watcher.mid_combo(trip)
-            if mids is None:
+            # Relevé allégé (Duffel, date médiane) mais passé dans la
+            # même chaîne que le run complet : les prix sont enregistrés
+            # et un nouveau plus bas déclenche bien une alerte.
+            try:
+                rows, alerts = watcher.flash_check_trip(cfg, trip, rates)
+            except Exception as e:
+                print(f"  Flash {trip_name}: échec — {e}")
                 continue
-            out_mid, ret_mid = mids
-            print(f"  Flash check {trip_name}: Duffel {out_mid}/{ret_mid}")
-            results = sources.search_duffel(
-                origins=cfg.origins, destinations=cfg.destinations,
-                outbound_dates=[out_mid], return_dates=[ret_mid],
-                adults=cfg.adults, currency=cfg.currency,
-                max_fly_h=cfg.max_fly_duration_hours,
-            )
-            if results:
-                print(f"  Flash {trip_name}: {len(results)} résultats, "
-                      f"best {results[0].price} {results[0].currency}")
+            if rows:
+                print(f"  Flash {trip_name}: {rows} lignes enregistrées, "
+                      f"{alerts} alerte(s)")
     except Exception as e:
         print(f"Flash check error: {e}")
     finally:
