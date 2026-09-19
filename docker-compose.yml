@@ -6,6 +6,9 @@ services:
     container_name: flightwatch
     environment:
       DUFFEL_API_KEY: ${DUFFEL_API_KEY:-}
+      # Sondes compagnies (section probes de config.yml). Vide = sondes
+      # inactives, sans erreur : meme court-circuit que Duffel sans cle.
+      AFKL_API_KEY: ${AFKL_API_KEY:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
       # Protège PUT/GET /api/admin/config et POST /api/run-now.
       # Vide = routes ouvertes (dev local uniquement).

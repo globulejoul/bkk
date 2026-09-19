@@ -1340,11 +1340,20 @@ async function loadAdmin() {
       ? 'Mot de passe administrateur requis'
       : `HTTP ${ra.status}`);
     _adminConfig = await ra.json();
+    // Etat des sondes : non bloquant, la config doit s'afficher meme si
+    // cette route echoue.
+    try {
+      const rp = await adminFetch('/api/probes');
+      _probeStatus = rp.ok ? await rp.json() : [];
+    } catch (e) {
+      _probeStatus = [];
+    }
     renderOrigins();
     renderDestinations();
     renderTravelers();
     renderTrips();
     renderHotelsAdmin();
+    renderProbesAdmin();
     adminMessage('');
   } catch (e) {
     adminMessage('Erreur chargement config');
@@ -1575,6 +1584,176 @@ function renderHotelsAdmin() {
   });
 }
 
+// ── Sondes compagnies ──────────────────────────────────
+// Etat serveur (quota consomme, cle presente, couverture) : la config
+// seule ne dit pas si la sonde tourne reellement.
+let _probeStatus = [];
+
+const CARRIER_LABEL = { AF: 'Air France', KL: 'KLM' };
+
+function renderProbesAdmin() {
+  const container = $('#admin-probes');
+  if (!_adminConfig) return;
+  const probes = _adminConfig.probes || [];
+  const tripNames = (_adminConfig.trips || []).map(t => t.name);
+  container.innerHTML = '';
+
+  if (!probes.length) {
+    container.innerHTML = '<span class="dim" style="font-size:0.8rem">Aucune sonde configurée</span>';
+    return;
+  }
+
+  probes.forEach((p, idx) => {
+    const st = _probeStatus.find(s => s.name === p.name) || {};
+    const chosen = p.trips || [];
+    const selectedTrip = chosen.length ? chosen[0] : '';
+    // Une sonde peut viser plusieurs periodes en YAML ; le select n'en
+    // montre qu'une, donc y toucher les ecraserait en silence.
+    const multi = chosen.length > 1;
+    // Une periode renommee laisse la sonde orpheline : sans cette option
+    // explicite, le select affichait « Toutes » alors que la config dit
+    // autre chose, et choisir « Toutes » ne declenchait aucun change.
+    const orphan = selectedTrip && !tripNames.includes(selectedTrip);
+    const card = document.createElement('div');
+    card.className = 'trip-edit-card' + (p.enabled === false ? ' trip-disabled' : '');
+
+    // La cle vit en variable d'environnement : sans elle la sonde se
+    // court-circuite en silence, ce qui est indistinguable d'une panne.
+    let quota = '';
+    if (st.key_present === false) {
+      quota = `<span style="color:var(--rose)">Clé absente : définir ${esc(st.key_env || p.key_env || 'AFKL_API_KEY')} dans .env</span>`;
+    } else if (st.quota_limit) {
+      const pct = Math.round(100 * (st.quota_used || 0) / st.quota_limit);
+      quota = `Quota du jour : ${st.quota_used || 0} / ${st.quota_limit} (${pct} %) — seau « ${esc(st.quota_bucket || '')} »`;
+    }
+    const cover = (st.trips || [])
+      .filter(t => t.cells)
+      .map(t => `${esc(t.trip_name)} : ${t.cells} cellule(s)`
+         + (t.best_eur != null ? `, meilleur ${Math.round(t.best_eur)} €` : ''))
+      .join(' · ');
+    const failing = (st.trips || []).filter(t => t.last_error);
+
+    card.innerHTML = `
+      <div class="trip-edit-header">
+        <label class="toggle" title="${p.enabled !== false ? 'Désactiver' : 'Activer'}">
+          <input type="checkbox" ${p.enabled !== false ? 'checked' : ''} data-probe-toggle="${idx}" aria-label="Activer ${esc(p.name)}">
+          <span class="toggle-slider"></span>
+        </label>
+        <span class="trip-edit-name">${esc(p.name)}</span>
+        <button class="tag-remove" data-remove-probe="${idx}" title="Supprimer"
+                aria-label="Supprimer la sonde ${esc(p.name)}">×</button>
+      </div>
+      <div class="trip-edit-row">
+        <label for="probe-${idx}-carrier">Compagnie</label>
+        <select id="probe-${idx}-carrier" name="probe-${idx}-carrier" data-probe="${idx}" data-field="travel_host">
+          ${Object.entries(CARRIER_LABEL).map(([code, label]) =>
+            `<option value="${code}" ${p.travel_host === code ? 'selected' : (code === 'AF' && p.travel_host !== 'KL' ? 'selected' : '')}>${esc(label)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="trip-edit-row">
+        <label for="probe-${idx}-origins">Départs</label>
+        <input type="text" id="probe-${idx}-origins" name="probe-${idx}-origins"
+               value="${attr((p.origins || []).join(', '))}" placeholder="CDG"
+               data-probe="${idx}" data-field="origins" style="width:130px">
+        <span class="date-sep">vers</span>
+        <label for="probe-${idx}-dests" class="sr-only">Destinations</label>
+        <input type="text" id="probe-${idx}-dests" name="probe-${idx}-dests"
+               value="${attr((p.destinations || []).join(', '))}" placeholder="BKK"
+               data-probe="${idx}" data-field="destinations" style="width:130px">
+      </div>
+      <div class="trip-edit-row">
+        <label for="probe-${idx}-trip">Période</label>
+        <select id="probe-${idx}-trip" name="probe-${idx}-trip" data-probe="${idx}" data-field="trips" ${multi ? 'disabled' : ''}>
+          ${multi ? `<option selected>${chosen.length} périodes — éditer config.yml</option>` : `
+          <option value="" ${selectedTrip ? '' : 'selected'}>Toutes</option>
+          ${orphan ? `<option value="${attr(selectedTrip)}" selected>${esc(selectedTrip)} — période inconnue</option>` : ''}
+          ${tripNames.map(n => `<option value="${attr(n)}" ${n === selectedTrip ? 'selected' : ''}>${esc(n)}</option>`).join('')}`}
+        </select>
+      </div>
+      <div class="trip-edit-row">
+        <label for="probe-${idx}-mode">Dates</label>
+        <select id="probe-${idx}-mode" name="probe-${idx}-mode" data-probe="${idx}" data-field="date_mode">
+          <option value="grid" ${p.date_mode === 'median' ? '' : 'selected'}>Grille tournante</option>
+          <option value="median" ${p.date_mode === 'median' ? 'selected' : ''}>Date médiane seule</option>
+        </select>
+        <label for="probe-${idx}-cells" style="margin-left:0.6rem">Cellules / run</label>
+        <input type="number" id="probe-${idx}-cells" name="probe-${idx}-cells" min="1" max="12"
+               value="${attr(p.cells_per_run == null ? 4 : p.cells_per_run)}"
+               data-probe="${idx}" data-field="cells_per_run" style="width:70px">
+      </div>
+      <div class="trip-edit-row">
+        <label for="probe-${idx}-pax">Passagers</label>
+        <select id="probe-${idx}-pax" name="probe-${idx}-pax" data-probe="${idx}" data-field="passengers">
+          <option value="adults" ${p.passengers === 'family' ? '' : 'selected'}>Adultes seuls (comparable aux autres sources)</option>
+          <option value="family" ${p.passengers === 'family' ? 'selected' : ''}>Famille complète (prix réel, non comparable)</option>
+        </select>
+      </div>
+      ${quota ? `<div class="trip-edit-row dim" style="font-size:0.75rem">${quota}</div>` : ''}
+      ${cover ? `<div class="trip-edit-row dim" style="font-size:0.75rem">${cover}</div>` : ''}
+      ${failing.length ? `<div class="trip-edit-row" style="font-size:0.75rem;color:var(--rose)">Dernière erreur : ${esc(failing[0].last_error)}</div>` : ''}
+    `;
+
+    card.querySelectorAll('[data-field]').forEach(el => {
+      el.addEventListener('change', () => {
+        const pr = _adminConfig.probes[el.dataset.probe];
+        const f = el.dataset.field;
+        if (f === 'origins' || f === 'destinations') {
+          pr[f] = el.value.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        } else if (f === 'trips') {
+          // Liste vide = toutes les periodes ; l'admin n'en expose qu'une,
+          // le YAML reste libre d'en lister plusieurs.
+          pr.trips = el.value ? [el.value] : [];
+        } else if (f === 'cells_per_run') {
+          pr.cells_per_run = parseInt(el.value, 10) || 4;
+        } else {
+          pr[f] = el.value;
+        }
+      });
+    });
+    card.querySelector('input[data-probe-toggle]').addEventListener('change', (e) => {
+      _adminConfig.probes[idx].enabled = e.target.checked;
+      card.classList.toggle('trip-disabled', !e.target.checked);
+    });
+    card.querySelector('button[data-remove-probe]').addEventListener('click', () => {
+      _adminConfig.probes.splice(idx, 1);
+      renderProbesAdmin();
+    });
+    container.appendChild(card);
+  });
+}
+
+function addProbe() {
+  const nameInput = $('#add-probe-name');
+  const carrier = $('#add-probe-carrier').value;
+  const originInput = $('#add-probe-origin');
+  const destInput = $('#add-probe-dest');
+  const name = nameInput.value.trim();
+  const origin = originInput.value.trim().toUpperCase();
+  const dest = destInput.value.trim().toUpperCase();
+  if (!name || !origin || !dest) return;
+  if (!_adminConfig.probes) _adminConfig.probes = [];
+  // Bornes serveur repliquees ici : sans elles, la 5e sonde ou un nom
+  // deja pris faisait echouer la sauvegarde ENTIERE en 422, emportant
+  // les modifications sans rapport faites dans le meme ecran.
+  if (_adminConfig.probes.length >= 4) {
+    adminMessage('4 sondes maximum'); return;
+  }
+  if (_adminConfig.probes.some(p => p.name === name)) {
+    adminMessage(`Une sonde s'appelle déjà « ${name} »`); return;
+  }
+  _adminConfig.probes.push({
+    name, adapter: 'afklm', travel_host: carrier,
+    key_env: 'AFKL_API_KEY',
+    origins: [origin], destinations: [dest], trips: [],
+    date_mode: 'grid', cells_per_run: 4, min_interval_s: 1.2,
+    cabin: 'ECONOMY', passengers: 'adults', enabled: true,
+  });
+  renderProbesAdmin();
+  nameInput.value = '';
+  originInput.value = '';
+  destInput.value = '';
+}
+
 function addHotel() {
   const nameInput = $('#add-hotel-name');
   const entityInput = $('#add-hotel-entity');
@@ -1759,6 +1938,7 @@ $('#btn-add-origin').addEventListener('click', addOrigin);
 $('#btn-add-dest').addEventListener('click', addDestination);
 $('#admin-save').addEventListener('click', saveConfig);
 $('#btn-add-hotel').addEventListener('click', addHotel);
+$('#btn-add-probe').addEventListener('click', addProbe);
 $('#admin-test-notif').addEventListener('click', testNotification);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id === 'add-origin') addOrigin();

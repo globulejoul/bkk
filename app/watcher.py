@@ -9,10 +9,14 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from app import db, fx, hotels, notify, sources
-from app.config import Config, HotelWatch, Trip
+from app import db, fx, hotels, notify, probes, sources
+from app.config import Config, HotelWatch, Probe, Trip
 
 log = logging.getLogger(__name__)
+
+# Un seau vide se re-signale sinon à chaque run, quatre fois par jour,
+# alors que c'est un défaut de calibrage et non une alerte prix.
+_probe_exhausted_notified: set[tuple[str, str]] = set()
 
 
 # Même fenêtre que le dashboard (api.py appelle price_trend days=7) :
@@ -144,6 +148,10 @@ def run_once(cfg: Config) -> dict[str, Any]:
         "errors": [], "expired": [], "status": "ok",
     }
     trips_active = 0
+    # Un seul budget mural pour toutes les sondes du run, toutes périodes
+    # confondues : c'est la seule façon de borner leur contribution au
+    # RUN_TIMEOUT quel que soit le nombre de périodes surveillées.
+    probe_deadline = time.monotonic() + probes.PROBE_BUDGET_S
     try:
         rates = fx.fetch_rates(cfg.currency, ["THB"])
 
@@ -159,7 +167,8 @@ def run_once(cfg: Config) -> dict[str, Any]:
                 continue
             trips_active += 1
             try:
-                nb_rows, trip_alerts = _check_trip(cfg, trip, rates)
+                nb_rows, trip_alerts = _check_trip(
+                    cfg, trip, rates, probe_deadline=probe_deadline)
                 summary["alerts_generated"] += trip_alerts
                 if nb_rows:
                     summary["trips_checked"] += 1
@@ -291,8 +300,8 @@ def mid_combo(trip: Trip) -> tuple[str, str] | None:
     return out_mid, rets[len(rets) // 2]
 
 
-def _check_trip(cfg: Config, trip: Trip,
-                rates: dict[str, float]) -> tuple[int, int]:
+def _check_trip(cfg: Config, trip: Trip, rates: dict[str, float],
+                *, probe_deadline: float | None = None) -> tuple[int, int]:
     """Relevé complet d'une période. Renvoie (lignes persistées, alertes)."""
     # Dates échues écartées et contraintes de durée appliquées : sans
     # elles un A/R de 0 ou 40 nuits pouvait devenir le « nouveau plus
@@ -337,7 +346,72 @@ def _check_trip(cfg: Config, trip: Trip,
             )
     log.info(f"  Duffel: {len(duffel_results)} résultats ({nb_combos} combos dates)")
 
-    return process_results(cfg, trip, ff_results + duffel_results, rates)
+    rows, alerts = process_results(cfg, trip, ff_results + duffel_results,
+                                   rates)
+    # 3) Sondes compagnies, APRÈS la persistance du marché : elles sont
+    # cadencées à 1 req/s et ne doivent pas retarder les alertes. Leurs
+    # relevés partent dans probe_checks, jamais dans la chaîne d'alerte.
+    _run_probes(cfg, trip, combos, rates, deadline=probe_deadline)
+    return rows, alerts
+
+
+def _run_probes(cfg: Config, trip: Trip, combos: dict[str, list[str]],
+                rates: dict[str, float],
+                *, deadline: float | None = None) -> None:
+    """Exécute les sondes d'une période. N'échoue jamais la période.
+
+    Volontairement absente de flash_check_trip : le flash tourne toutes
+    les 5 minutes, soit 288 déclenchements par jour pour un quota de 100.
+    """
+    active = probes.probes_for(cfg, trip)
+    if not active:
+        return
+    now = datetime.now().isoformat()
+    # Le budget vient du run entier, pas de la période : sinon il se
+    # remet à neuf à chaque période et ne borne plus rien.
+    if deadline is None:
+        deadline = time.monotonic() + probes.PROBE_BUDGET_S
+
+    def to_eur(amount: float, currency: str) -> float | None:
+        return fx.to_eur(amount, currency, rates)
+
+    for probe in active:
+        try:
+            report = probes.run_probe(cfg, probe, trip, combos,
+                                      now=now, to_eur=to_eur,
+                                      deadline=deadline)
+        except Exception as e:                       # jamais fatal
+            log.error(f"  ❌ sonde {probe.name}: {e}")
+            continue
+        if report["calls"]:
+            perdu = (f", {report['failed']} perdue(s)"
+                     if report.get("failed") else "")
+            arret = (f" — arrêt : {report['stopped']}"
+                     if report.get("stopped") else "")
+            log.info(f"  🔎 sonde {probe.name}: {report['rows']} relevés "
+                     f"sur {report['calls']} requêtes{perdu}{arret}")
+        if report["exhausted"]:
+            _notify_probe_exhausted(cfg, probe)
+
+
+def _notify_probe_exhausted(cfg: Config, probe: Probe) -> None:
+    """Prévient une fois par jour et par seau, pas à chaque run."""
+    today = date.today().isoformat()
+    key = (probe.bucket, today)
+    if key in _probe_exhausted_notified:
+        return
+    # Purge des jours précédents : le conteneur tourne des mois.
+    _probe_exhausted_notified.difference_update(
+        {k for k in _probe_exhausted_notified if k[1] != today})
+    _probe_exhausted_notified.add(key)
+    limit = cfg.bucket_quota(probe.bucket)
+    log.warning(f"  ⚠ sonde {probe.name}: seau « {probe.bucket} » "
+                f"épuisé ({limit} requêtes)")
+    notify.send_ops_ntfy(
+        cfg, "🔎 Quota de sonde épuisé",
+        f"Le seau « {probe.bucket} » a atteint son plafond de {limit} "
+        f"requêtes aujourd'hui. Les cellules restantes seront reprises "
+        f"demain, exactement là où la sonde {probe.name} s'est arrêtée.")
 
 
 def flash_check_trip(cfg: Config, trip: Trip,

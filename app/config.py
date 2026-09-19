@@ -32,7 +32,28 @@ MAX_TRIPS = 20
 MAX_HOTELS = 10
 MAX_WINDOW_DAYS = 31
 
+# Sondes : les plafonds viennent du quota de l'API interrogée, pas du
+# temps de run. Air France Open Data donne 100 requêtes/jour pour toute
+# la clé (mesuré : les hosts AF et KL partagent le même seau), et une
+# requête ne couvre qu'un couple origine/destination sur une paire de
+# dates. Un périmètre large vide le quota avant la fin du premier run.
+MAX_PROBES = 4
+MAX_PROBE_ORIGINS = 3
+MAX_PROBE_DESTS = 3
+MAX_PROBE_CELLS = 12
+DEFAULT_BUCKET_QUOTA = 80          # 80 sur 100 : marge pour run-now et retries
+
+PROBE_ADAPTERS = {"afklm"}
+PROBE_HOSTS = {"AF", "KL"}
+PROBE_CABINS = {"ECONOMY", "PREMIUM_ECONOMY", "BUSINESS"}
+PROBE_DATE_MODES = {"grid", "median"}
+PROBE_PAX = {"adults", "family"}
+
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
+# Nom de variable d'environnement, jamais la clé elle-même. Une vraie clé
+# Air France (minuscules + chiffres) échoue sur ce motif : c'est
+# volontaire, config.yml est servi au navigateur par GET /api/admin/config.
+_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,40}$")
 
 # load() est appelé à chaque requête HTTP : on ne répète pas les mêmes
 # avertissements dans les logs.
@@ -61,6 +82,45 @@ class HotelWatch:
 
 
 @dataclass
+class Probe:
+    """Interrogation directe de l'API d'une compagnie, périmètre restreint.
+
+    Une sonde ne remplace aucune source : elle mesure UNE compagnie sur
+    UNE route, pour reconstruire la grille de dates que fli ne donne pas
+    (il ne sonde que la date médiane). Ses relevés vivent dans
+    `probe_checks` et ne touchent ni l'état, ni les alertes.
+
+    La clé d'API vit en variable d'environnement — `key_env` n'en porte
+    que le NOM.
+    """
+    name: str
+    adapter: str = "afklm"
+    travel_host: str = "AF"          # AF | KL, en-tête AFKL-TRAVEL-Host
+    key_env: str = "AFKL_API_KEY"
+    origins: list[str] = field(default_factory=list)
+    destinations: list[str] = field(default_factory=list)
+    trips: list[str] = field(default_factory=list)   # vide = toutes
+    date_mode: str = "grid"          # grid | median
+    cells_per_run: int = 4
+    min_interval_s: float = 1.2
+    cabin: str = "ECONOMY"
+    passengers: str = "adults"       # adults | family
+    enabled: bool = True
+
+    @property
+    def bucket(self) -> str:
+        """Le seau de quota EST le credential.
+
+        Mesuré : les hosts AF et KL d'une même clé Air France puisent
+        dans les mêmes 100 requêtes/jour. Laisser l'utilisateur nommer
+        librement son seau permettait à deux sondes sur la même clé d'en
+        déclarer deux, donc d'obtenir 160 requêtes pour un quota réel de
+        100. Le nom de la variable d'environnement lève l'ambiguïté.
+        """
+        return self.key_env
+
+
+@dataclass
 class NtfyConfig:
     server: str = "https://ntfy.sh"
     topic: str | None = None
@@ -81,8 +141,16 @@ class Config:
     ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     trips: list[Trip] = field(default_factory=list)
     hotels: list[HotelWatch] = field(default_factory=list)
+    probes: list[Probe] = field(default_factory=list)
+    # Plafond journalier par seau. La clé du seau est le CREDENTIAL, pas
+    # la sonde : deux sondes sur la même clé ne peuvent pas déclarer deux
+    # plafonds, sinon celui réellement appliqué dépend de l'ordre d'appel.
+    quota_buckets: dict[str, int] = field(default_factory=dict)
     # VPN proxy URL (set via env, not in config)
     vpn_proxy_url: str | None = None
+
+    def bucket_quota(self, bucket: str) -> int:
+        return int(self.quota_buckets.get(bucket, DEFAULT_BUCKET_QUOTA))
 
 
 def _as_date_str(value: Any) -> str:
@@ -97,6 +165,26 @@ def _as_date_str(value: Any) -> str:
     if isinstance(value, (datetime, date)):
         return value.isoformat()[:10]
     return str(value).strip()[:10]
+
+
+def _as_int(value: Any, default: int) -> int:
+    """Entier tolérant : load() est appelé à CHAQUE requête HTTP.
+
+    Un `cells_per_run: abc` saisi à la main ferait lever int() et
+    emporterait toute l'API, pas seulement la sonde fautive. Le reste du
+    fichier est durci de la même façon ; _config_errors dit pourquoi.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _as_date(value: Any) -> date | None:
@@ -197,6 +285,76 @@ def _hotel_errors(h: dict) -> list[str]:
     return errs
 
 
+def _probe_errors(p: dict) -> list[str]:
+    """Défauts structurels d'une sonde. Bloquants : elle est éditable
+    depuis l'admin, donc l'erreur doit revenir à l'écran, pas dans un log.
+
+    Le budget de requêtes, lui, n'est PAS ici : un dépassement ne doit
+    jamais refuser une sauvegarde admin (cf. _probe_budget_warnings).
+    """
+    name = str(p.get("name") or "?")
+    errs: list[str] = []
+    if not p.get("name") or len(name) > 40:
+        errs.append(f"Sonde {name}: nom requis, 40 caractères maximum")
+
+    if p.get("adapter", "afklm") not in PROBE_ADAPTERS:
+        errs.append(f"Sonde {name}: adapter « {p.get('adapter')} » inconnu "
+                    f"(disponible : {', '.join(sorted(PROBE_ADAPTERS))})")
+    if p.get("travel_host", "AF") not in PROBE_HOSTS:
+        errs.append(f"Sonde {name}: travel_host doit valoir "
+                    f"{' ou '.join(sorted(PROBE_HOSTS))}")
+    if p.get("cabin", "ECONOMY") not in PROBE_CABINS:
+        errs.append(f"Sonde {name}: cabine « {p.get('cabin')} » inconnue")
+    if p.get("date_mode", "grid") not in PROBE_DATE_MODES:
+        errs.append(f"Sonde {name}: date_mode doit valoir grid ou median")
+    if p.get("passengers", "adults") not in PROBE_PAX:
+        errs.append(f"Sonde {name}: passengers doit valoir adults ou family")
+
+    # Une clé d'API collée ici partirait au navigateur via
+    # GET /api/admin/config : on n'accepte qu'un nom de variable d'env.
+    # Absent = valeur par défaut du dataclass, ce n'est pas une erreur.
+    if p.get("key_env") is not None and not _ENV_RE.match(str(p["key_env"])):
+        errs.append(f"Sonde {name}: key_env doit être un NOM de variable "
+                    "d'environnement en majuscules (ex. AFKL_API_KEY), "
+                    "jamais la clé elle-même")
+
+    # Tout champ qui ressemble à un secret est refusé, quel que soit son
+    # nom : ce bloc est servi au navigateur et réécrit dans config.yml.
+    for champ in p:
+        if champ != "key_env" and re.search(
+                r"key|secret|token|password|passwd", str(champ), re.I):
+            errs.append(f"Sonde {name}: champ « {champ} » interdit — les "
+                        "secrets vivent en variable d'environnement")
+
+    for key, cap in (("origins", MAX_PROBE_ORIGINS),
+                     ("destinations", MAX_PROBE_DESTS)):
+        codes = p.get(key) or []
+        if not codes:
+            errs.append(f"Sonde {name}: {key} ne peut pas être vide")
+        elif len(codes) > cap:
+            errs.append(f"Sonde {name}: {len(codes)} {key}, maximum {cap} "
+                        "(le quota de l'API est le facteur limitant)")
+        for code in codes:
+            if not _IATA_RE.match(str(code).strip().upper()):
+                errs.append(f"Sonde {name}: « {code} » n'est pas un code IATA")
+
+    cells = p.get("cells_per_run", 4)
+    if not isinstance(cells, int) or not 1 <= cells <= MAX_PROBE_CELLS:
+        errs.append(f"Sonde {name}: cells_per_run doit être entre 1 et "
+                    f"{MAX_PROBE_CELLS}")
+    interval = p.get("min_interval_s", 1.2)
+    if not isinstance(interval, (int, float)) or not 0.5 <= interval <= 10:
+        errs.append(f"Sonde {name}: min_interval_s doit être entre 0.5 et 10")
+
+    # Une période inconnue N'EST PAS une erreur bloquante : elle rendrait
+    # la sonde muette, ce qui équivaut à enabled: false et n'abîme rien.
+    # En revanche save_raw refuse toute la config sur la moindre erreur —
+    # renommer une période depuis l'admin aurait donc verrouillé la page
+    # entière pour une sonde orpheline. Avertissement, voir
+    # _probe_budget_warnings.
+    return errs
+
+
 def _config_errors(data: dict) -> list[str]:
     """Défauts qui rendent la surveillance muette, fausse ou explosive."""
     errs: list[str] = []
@@ -223,7 +381,118 @@ def _config_errors(data: dict) -> list[str]:
     for h in hotels:
         if isinstance(h, dict):
             errs += _hotel_errors(h)
+
+    probes = data.get("probes") or []
+    if len(probes) > MAX_PROBES:
+        errs.append(f"probes: {len(probes)} sondes, maximum {MAX_PROBES}")
+    seen: set[str] = set()
+    for p in probes:
+        if not isinstance(p, dict):
+            continue
+        errs += _probe_errors(p)
+        nm = str(p.get("name") or "")
+        if nm and nm in seen:
+            errs.append(f"probes: deux sondes portent le nom « {nm} »")
+        seen.add(nm)
     return errs
+
+
+def _probe_budget_warnings(probes: list[Probe], trips: list[Trip],
+                           quota_buckets: dict[str, int],
+                           schedule_cron: str) -> list[str]:
+    """Le budget est un AVERTISSEMENT, jamais un refus d'écriture.
+
+    save_raw lève sur la moindre erreur, toutes sections confondues :
+    rendre le budget bloquant aurait suffi à refuser toute sauvegarde
+    admin — y compris un simple changement de cron — et à ne plus rien
+    rendre modifiable sans SSH. La vraie protection est le seau, qui
+    arrête la sonde net quand il est vide.
+    """
+    runs = _runs_per_day(schedule_cron)
+    known = {t.name for t in trips}
+    warns: list[str] = []
+    per_bucket: dict[str, int] = {}
+
+    for p in probes:
+        # Une période inconnue rend la sonde muette : jamais bloquant,
+        # mais il faut le dire, sinon la sonde ne tourne simplement pas.
+        for tn in p.trips:
+            if tn not in known:
+                warns.append(f"sonde « {p.name} » : période « {tn} » "
+                             "inconnue, la sonde ne tournera pas")
+        if not p.enabled:
+            continue
+        nb_trips = len([t for t in trips if t.enabled
+                        and (not p.trips or t.name in p.trips)])
+        if not nb_trips:
+            continue
+        cells = 1 if p.date_mode == "median" else p.cells_per_run
+        cost = cells * len(p.origins) * len(p.destinations) * nb_trips * runs
+        per_bucket[p.bucket] = per_bucket.get(p.bucket, 0) + cost
+
+    # Un seau déclaré qui ne correspond au key_env d'aucune sonde ne
+    # plafonne rien : le vrai seau retombe silencieusement sur le défaut.
+    # Cause la plus probable : une faute de frappe sur le nom de variable.
+    for bucket in quota_buckets:
+        if bucket not in {p.key_env for p in probes}:
+            warns.append(
+                f"quota_buckets déclare « {bucket} », qui n'est le key_env "
+                "d'aucune sonde : ce plafond ne s'applique à rien")
+
+    for bucket, cost in per_bucket.items():
+        limit = int(quota_buckets.get(bucket, DEFAULT_BUCKET_QUOTA))
+        if cost > limit:
+            names = ", ".join(p.name for p in probes
+                              if p.enabled and p.bucket == bucket)
+            warns.append(
+                f"seau « {bucket} » : {names} demandent au MINIMUM {cost} "
+                f"requêtes/jour (hors rejeux) pour un plafond de {limit}. "
+                "Les cellules au-delà du plafond seront simplement "
+                "abandonnées jusqu'au lendemain.")
+    return warns
+
+
+def _cron_field_count(field_txt: str, period: int) -> int:
+    """Nombre de déclenchements d'un champ cron sur sa période.
+
+    Gère « * », « */n », les listes « 7,19 » et les intervalles « 8-20 ».
+    On ne réimplémente pas croniter : il s'agit seulement de savoir si le
+    budget d'une sonde tient dans le quota de son API.
+    """
+    field_txt = (field_txt or "*").strip()
+    total = 0
+    for part in field_txt.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        if "/" in part:
+            base, _, step_txt = part.partition("/")
+            step = _as_int(step_txt, 1) or 1
+            part = base.strip() or "*"
+        if part == "*":
+            total += max(1, period // step)
+            continue
+        if "-" in part:
+            lo_txt, _, hi_txt = part.partition("-")
+            lo, hi = _as_int(lo_txt, 0), _as_int(hi_txt, 0)
+            total += max(1, ((hi - lo) // step) + 1) if hi >= lo else 1
+            continue
+        total += 1
+    return max(1, total)
+
+
+def _runs_per_day(cron: str) -> int:
+    """Déclenchements quotidiens, minutes ET heures.
+
+    Ignorer le champ des minutes sous-estimait grossièrement : un cron
+    « */30 * * * * » fait 48 runs par jour, pas 24 — et le budget d'une
+    sonde en dépend directement.
+    """
+    parts = str(cron or "").split()
+    if len(parts) < 2:
+        return 4
+    return _cron_field_count(parts[0], 60) * _cron_field_count(parts[1], 24)
 
 
 # ── Lecture / écriture ───────────────────────────────────────
@@ -244,7 +513,11 @@ _HEADER = """\
 # config.example.yml.
 #
 # Éditable depuis l'admin : origins, destinations, adults, children,
-# max_fly_duration_hours, schedule_cron, trips, hotels.
+# max_fly_duration_hours, schedule_cron, trips, hotels, probes.
+#
+# Les sondes (probes) ne portent QUE le nom de la variable d'environnement
+# qui contient la clé (key_env), jamais la clé : ce fichier est servi au
+# navigateur par GET /api/admin/config.
 #
 # À éditer à la main uniquement (non exposés par l'admin) :
 #   currency / currencies  devise de référence et devises comparées
@@ -320,6 +593,35 @@ def load() -> Config:
         for t in data.get("trips", [])
     ]
 
+    probes = [
+        Probe(
+            name=str(p["name"]),
+            adapter=str(p.get("adapter") or "afklm"),
+            travel_host=str(p.get("travel_host") or "AF").upper(),
+            key_env=str(p.get("key_env") or "AFKL_API_KEY"),
+            origins=[str(o).strip().upper() for o in p.get("origins") or []],
+            destinations=[str(d).strip().upper()
+                          for d in p.get("destinations") or []],
+            trips=[str(t) for t in p.get("trips") or []],
+            date_mode=str(p.get("date_mode") or "grid"),
+            cells_per_run=_as_int(p.get("cells_per_run"), 4),
+            min_interval_s=_as_float(p.get("min_interval_s"), 1.2),
+            cabin=str(p.get("cabin") or "ECONOMY").upper(),
+            passengers=str(p.get("passengers") or "adults"),
+            enabled=p.get("enabled", True),
+        )
+        for p in data.get("probes", []) or []
+        if isinstance(p, dict) and p.get("name")
+    ]
+    raw_buckets = data.get("quota_buckets")
+    quota_buckets = ({str(k): _as_int(v, DEFAULT_BUCKET_QUOTA)
+                      for k, v in raw_buckets.items()}
+                     if isinstance(raw_buckets, dict) else {})
+    for warn in _probe_budget_warnings(
+            probes, trips, quota_buckets,
+            data.get("schedule_cron", "0 7,19 * * *")):
+        _warn_once(warn)
+
     ntfy_data = data.get("ntfy") or {}
     return Config(
         origins=data["origins"],
@@ -337,6 +639,8 @@ def load() -> Config:
             topic=ntfy_data.get("topic"),
         ),
         trips=trips,
+        probes=probes,
+        quota_buckets=quota_buckets,
         hotels=[
             HotelWatch(
                 name=h["name"],
@@ -392,6 +696,17 @@ def save_raw(data: dict) -> None:
             w = t.get(key)
             if isinstance(w, (list, tuple)):
                 t[key] = [_as_date_str(d) for d in w]
+
+    for p in data.get("probes", []) or []:
+        if not p.get("name"):
+            raise ValueError("Chaque sonde doit avoir un nom")
+        # Normalisé avant validation : « cdg » saisi en minuscules dans
+        # l'admin échouerait sinon sur le motif IATA.
+        for key in ("origins", "destinations"):
+            p[key] = [str(v).strip().upper() for v in p.get(key) or []
+                      if str(v).strip()]
+        p["travel_host"] = str(p.get("travel_host") or "AF").strip().upper()
+        p["cabin"] = str(p.get("cabin") or "ECONOMY").strip().upper()
 
     for h in data.get("hotels", []):
         if not h.get("name"):

@@ -204,6 +204,33 @@
         </div>
       </div>
 
+      <!-- Sondes compagnies : interrogation directe d'une API compagnie
+           sur un perimetre etroit, pour reconstruire la grille de dates
+           que fli ne donne pas (il ne sonde que la date mediane). -->
+      <div class="admin-card admin-wide">
+        <h3>Sondes compagnies</h3>
+        <p class="dim" style="font-size:0.78rem;margin:0 0 0.6rem">
+          Air France et KLM partagent un quota de 100 requêtes par jour pour
+          la même clé. Gardez le périmètre étroit : une requête = un couple
+          origine/destination sur une paire de dates.
+        </p>
+        <div id="admin-probes"></div>
+        <div class="tag-add" style="margin-top:0.75rem">
+          <label for="add-probe-name" class="sr-only">Nom de la sonde</label>
+          <input type="text" id="add-probe-name" name="add-probe-name" placeholder="Nom (ex: af-cdg-bkk)" style="width:170px">
+          <label for="add-probe-carrier" class="sr-only">Compagnie</label>
+          <select id="add-probe-carrier" name="add-probe-carrier">
+            <option value="AF">Air France</option>
+            <option value="KL">KLM</option>
+          </select>
+          <label for="add-probe-origin" class="sr-only">Aéroport de départ</label>
+          <input type="text" id="add-probe-origin" name="add-probe-origin" placeholder="CDG" maxlength="3" style="width:70px">
+          <label for="add-probe-dest" class="sr-only">Destination</label>
+          <input type="text" id="add-probe-dest" name="add-probe-dest" placeholder="BKK" maxlength="3" style="width:70px">
+          <button id="btn-add-probe">Ajouter</button>
+        </div>
+      </div>
+
       <div class="admin-card admin-wide admin-actions">
         <button id="admin-save" class="btn-save">Sauvegarder</button>
         <span id="admin-status" class="dim"></span>
@@ -217,6 +244,6 @@
 </main>
 
 
-<script src="/static/app.js?v=20"></script>
+<script src="/static/app.js?v=21"></script>
 </body>
 </html>

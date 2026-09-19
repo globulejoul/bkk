@@ -126,6 +126,60 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE state ADD COLUMN config_hash TEXT;
         ALTER TABLE hotel_state ADD COLUMN config_hash TEXT;
     """),
+    # Sondes par compagnie. Table SÉPARÉE, sur le précédent des hôtels
+    # (v3) plutôt qu'un discriminant `source` dans `checks` : une sonde
+    # mesure UNE compagnie sur UNE route, là où fli mesure le marché.
+    # Mélangées dans `checks`, ses lignes décalaient le 10e percentile
+    # (prix distincts, non pondérés → fausse alerte basse), polluaient
+    # trip_history et imposaient un NOT LIKE sur le chemin de lecture le
+    # plus chaud. Séparées, aucune de ces requêtes ne change d'une ligne.
+    (7, """
+        CREATE TABLE IF NOT EXISTS probe_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            check_date TEXT NOT NULL,
+            trip_name TEXT NOT NULL,
+            probe TEXT NOT NULL,
+            carrier TEXT NOT NULL,
+            origin TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            price_local REAL NOT NULL,
+            currency TEXT NOT NULL,
+            price_eur REAL,
+            outbound_date TEXT,
+            return_date TEXT,
+            out_h REAL,
+            ret_h REAL,
+            out_stops INTEGER,
+            ret_stops INTEGER,
+            airlines TEXT,
+            fare_family TEXT,
+            booking_url TEXT,
+            captured_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pc_trip_date
+            ON probe_checks(trip_name, check_date, price_eur);
+        CREATE INDEX IF NOT EXISTS idx_pc_cell
+            ON probe_checks(trip_name, probe, outbound_date, return_date);
+
+        CREATE TABLE IF NOT EXISTS probe_quota (
+            bucket TEXT NOT NULL,
+            day TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (bucket, day)
+        );
+
+        CREATE TABLE IF NOT EXISTS probe_cursor (
+            probe TEXT NOT NULL,
+            trip_name TEXT NOT NULL,
+            last_out TEXT,
+            last_ret TEXT,
+            grid_hash TEXT,
+            last_error TEXT,
+            consecutive_failures INTEGER DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY (probe, trip_name)
+        );
+    """),
 ]
 
 
@@ -233,6 +287,13 @@ def init() -> None:
             if version <= cur:
                 continue
             _apply_migration(c, version, sql)
+
+        # Le seau de quota est une ligne par jour et par credential :
+        # purge opportuniste plutôt qu'une tâche planifiée de plus.
+        try:
+            probe_quota_purge(c)
+        except sqlite3.Error as e:      # jamais bloquant au démarrage
+            log.warning(f"  ⚠ purge probe_quota: {e}")
 
 
 @contextmanager
@@ -672,4 +733,184 @@ def hotel_breakdown(c: sqlite3.Connection, hotel: str,
         GROUP BY b.source
         ORDER BY b.best_eur ASC
     """, {"hotel": hotel, "trip": trip}).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Probe queries ──────────────────────────────────────────────
+#
+# Les sondes vivent dans leurs propres tables : aucune des requêtes
+# ci-dessus ne les voit, donc ni l'état, ni les alertes, ni le 10e
+# percentile, ni les séries du dashboard ne peuvent être faussés par un
+# relevé mono-compagnie.
+
+
+def insert_probe_check(c: sqlite3.Connection, row: dict[str, Any]) -> None:
+    c.execute(
+        """INSERT INTO probe_checks (
+            check_date, trip_name, probe, carrier, origin, destination,
+            price_local, currency, price_eur,
+            outbound_date, return_date, out_h, ret_h,
+            out_stops, ret_stops, airlines, fare_family,
+            booking_url, captured_at
+        ) VALUES (
+            :check_date, :trip_name, :probe, :carrier, :origin, :destination,
+            :price_local, :currency, :price_eur,
+            :outbound_date, :return_date, :out_h, :ret_h,
+            :out_stops, :ret_stops, :airlines, :fare_family,
+            :booking_url, :captured_at
+        )""",
+        row,
+    )
+
+
+def probe_quota_take(c: sqlite3.Connection, bucket: str, limit: int,
+                     *, day: str | None = None) -> bool:
+    """Prend un jeton dans le seau du jour. False si le plafond est atteint.
+
+    Le seau appartient au CREDENTIAL, pas à la sonde : vérifié en
+    production, les hosts AF et KL d'une même clé Air France partagent
+    un unique quota de 100 requêtes/jour.
+
+    UPSERT en une instruction plutôt que SELECT puis UPDATE : deux runs
+    peuvent écrire en même temps (cron + /api/run-now, cf. conn()), et
+    la version en deux temps accordait deux fois le dernier jeton.
+    """
+    if limit <= 0:
+        return False
+    d = day or date.today().isoformat()
+    cur = c.execute(
+        "INSERT INTO probe_quota (bucket, day, used) VALUES (?, ?, 1) "
+        "ON CONFLICT(bucket, day) DO UPDATE SET used = used + 1 "
+        "WHERE used < ?",
+        (bucket, d, limit),
+    )
+    return bool(cur.rowcount)
+
+
+def probe_quota_used(c: sqlite3.Connection, bucket: str,
+                     *, day: str | None = None) -> int:
+    d = day or date.today().isoformat()
+    row = c.execute(
+        "SELECT used FROM probe_quota WHERE bucket=? AND day=?", (bucket, d)
+    ).fetchone()
+    return int(row["used"]) if row else 0
+
+
+def probe_quota_purge(c: sqlite3.Connection, keep_days: int = 30) -> None:
+    """Le seau est une ligne par jour : sans purge, la table grossit à vie."""
+    c.execute("DELETE FROM probe_quota WHERE day < ?",
+              ((date.today() - timedelta(days=keep_days)).isoformat(),))
+
+
+def probe_cursor_get(c: sqlite3.Connection, probe: str,
+                     trip: str) -> dict[str, Any] | None:
+    row = c.execute(
+        "SELECT * FROM probe_cursor WHERE probe=? AND trip_name=?",
+        (probe, trip),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def probe_cursor_set(c: sqlite3.Connection, probe: str, trip: str,
+                     *, last_out: str | None, last_ret: str | None,
+                     grid_hash: str, now: str,
+                     error: str | None = None) -> None:
+    """Mémorise la DERNIÈRE CELLULE visitée, pas un index.
+
+    Un index devenait faux dès qu'une date échue disparaissait de la
+    grille : la liste se décalait et la rotation repartait du début
+    chaque jour, si bien que les retours tardifs n'étaient jamais
+    interrogés. Une cellule (aller, retour) se retrouve par bissection
+    dans la liste du jour, même si des cellules ont disparu autour.
+    """
+    fail_sql = ("consecutive_failures = consecutive_failures + 1"
+                if error else "consecutive_failures = 0")
+    c.execute(
+        f"""INSERT INTO probe_cursor (
+                probe, trip_name, last_out, last_ret, grid_hash,
+                last_error, consecutive_failures, updated_at)
+            VALUES (:probe, :trip, :last_out, :last_ret, :grid_hash,
+                    :error, :seed, :now)
+            ON CONFLICT(probe, trip_name) DO UPDATE SET
+                last_out = :last_out, last_ret = :last_ret,
+                grid_hash = :grid_hash, last_error = :error,
+                {fail_sql}, updated_at = :now""",
+        {"probe": probe, "trip": trip, "last_out": last_out,
+         "last_ret": last_ret, "grid_hash": grid_hash, "error": error,
+         "seed": 1 if error else 0, "now": now},
+    )
+
+
+def probe_quota_fill(c: sqlite3.Connection, bucket: str, limit: int,
+                     *, day: str | None = None) -> None:
+    """Ferme le seau pour la journée.
+
+    Appelé quand le FOURNISSEUR répond « quota dépassé » : notre compteur
+    est alors en retard sur le sien (une requête perdue, un décalage de
+    fuseau sur l'heure de remise à zéro). Sans ça, chaque période et
+    chaque run suivant du jour repartait émettre une requête vouée au 403.
+    """
+    d = day or date.today().isoformat()
+    c.execute(
+        "INSERT INTO probe_quota (bucket, day, used) VALUES (?, ?, ?) "
+        "ON CONFLICT(bucket, day) DO UPDATE SET used = MAX(used, ?)",
+        (bucket, d, limit, limit),
+    )
+
+
+def probe_cursors_all(c: sqlite3.Connection) -> dict[tuple[str, str], dict]:
+    """Tous les curseurs en une requête, indexés par (sonde, période)."""
+    rows = c.execute("SELECT * FROM probe_cursor").fetchall()
+    return {(r["probe"], r["trip_name"]): dict(r) for r in rows}
+
+
+def probe_heatmap(c: sqlite3.Connection, trip: str, probe: str,
+                  carrier: str | None = None,
+                  days: int = 30) -> list[dict]:
+    """Grille aller × retour d'UNE sonde, source homogène.
+
+    Une seule sonde par matrice, et jamais mélangée aux relevés fli :
+    fli est multi-compagnies et trié au moins cher, donc ≤ une compagnie
+    seule par construction. Mélangés, le MIN aurait peint en « meilleure
+    date » la seule cellule que fli couvre — un artefact de couverture
+    lu comme un conseil de dates.
+    """
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    # Filtre sur la compagnie en plus du nom : changer AF en KL sur une
+    # sonde existante ne renomme pas la sonde, et la grille aurait alors
+    # mélangé deux produits différents dans le même MIN.
+    rows = c.execute(f"""
+        SELECT outbound_date, return_date, MIN(price_eur) AS best_eur,
+               MAX(check_date) AS last_seen,
+               GROUP_CONCAT(DISTINCT airlines) AS airlines
+        FROM probe_checks
+        WHERE trip_name = :trip AND probe = :probe AND price_eur IS NOT NULL
+          AND check_date >= :cutoff
+          {"AND carrier = :carrier" if carrier else ""}
+        GROUP BY outbound_date, return_date
+        ORDER BY outbound_date, return_date
+    """, {"trip": trip, "probe": probe, "cutoff": cutoff,
+          "carrier": carrier} if carrier else
+        {"trip": trip, "probe": probe, "cutoff": cutoff}).fetchall()
+    return [dict(r) for r in rows]
+
+
+def probe_summary(c: sqlite3.Connection, days: int = 30) -> list[dict]:
+    """Couverture et meilleur prix par (sonde, période)."""
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    # Le regroupement doit correspondre EXACTEMENT à la clé sur laquelle
+    # l'API indexe le résultat, (probe, trip_name) : avec `carrier` dans
+    # le GROUP BY, une sonde passée d'AF à KL produisait deux lignes dont
+    # une écrasait silencieusement l'autre côté appelant.
+    rows = c.execute("""
+        SELECT p.probe, p.trip_name,
+               GROUP_CONCAT(DISTINCT p.carrier) AS carriers,
+               COUNT(DISTINCT p.outbound_date || '>' || p.return_date) AS cells,
+               MIN(p.price_eur) AS best_eur,
+               MAX(p.captured_at) AS last_capture
+        FROM probe_checks p
+        WHERE p.price_eur IS NOT NULL AND p.check_date >= ?
+        GROUP BY p.probe, p.trip_name
+        ORDER BY p.probe, p.trip_name
+    """, (cutoff,)).fetchall()
     return [dict(r) for r in rows]

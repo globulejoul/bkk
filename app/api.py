@@ -420,6 +420,39 @@ def get_trip_heatmap(name: str, days: int = Query(180, ge=1, le=DAYS_MAX)):
     # dates par paire, donc une borne courte viderait la grille.
     with db.conn() as c:
         flat = db.heatmap_data(c, name, days)
+    return _heatmap_matrix(flat)
+
+
+@app.get("/api/trips/{name}/probe-heatmap")
+def get_trip_probe_heatmap(name: str, probe: str = Query(min_length=1),
+                           days: int = Query(30, ge=1, le=DAYS_MAX)):
+    """Grille d'UNE sonde, jamais mélangée aux relevés de marché.
+
+    fli est multi-compagnies et trié au moins cher : mélangé à une sonde
+    mono-compagnie dans le même MIN, il aurait peint en « meilleure date »
+    la seule cellule qu'il couvre — un artefact de couverture que
+    l'utilisateur lit comme un conseil de dates.
+    """
+    # La compagnie fait partie du produit mesuré : basculer une sonde
+    # d'AF vers KL ne change ni son nom ni sa grille, et les deux
+    # tarifs se seraient retrouvés dans le même MIN.
+    cfg = config.load()
+    pr = next((p for p in cfg.probes if p.name == probe), None)
+    if pr is None:
+        # Sans ça, un nom mal orthographié renvoyait 200 avec une grille
+        # vide — indistinguable de « pas encore de relevés » — et, pire,
+        # abandonnait le filtre compagnie que cette route garantit.
+        raise HTTPException(status_code=404, detail=f"Sonde inconnue : {probe}")
+    with db.conn() as c:
+        flat = db.probe_heatmap(c, name, probe, pr.travel_host, days)
+    data = _heatmap_matrix(flat)
+    data["probe"] = probe
+    data["last_seen"] = {f"{r['outbound_date']}>{r['return_date']}":
+                         r["last_seen"] for r in flat}
+    return data
+
+
+def _heatmap_matrix(flat: list[dict]) -> dict[str, Any]:
     if not flat:
         return {"outbound_dates": [], "return_dates": [], "prices": []}
     # Build 2D matrix expected by frontend
@@ -443,6 +476,53 @@ def get_trip_heatmap(name: str, days: int = Query(180, ge=1, le=DAYS_MAX)):
             prices[out_idx[od]][ret_idx[rd]] = row["best_eur"]
     return {"outbound_dates": outbound_dates, "return_dates": return_dates,
             "prices": prices}
+
+
+@app.get("/api/probes", dependencies=[Depends(require_admin)])
+def get_probes():
+    """État des sondes : couverture, quota consommé, dernière erreur.
+
+    Le quota est le seul indicateur fiable dont on dispose : la gateway
+    Air France ne renvoie aucun en-tête de quota, c'est notre compteur
+    qui fait foi.
+    """
+    cfg = config.load()
+    with db.conn() as c:
+        coverage = {(r["probe"], r["trip_name"]): r
+                    for r in db.probe_summary(c)}
+        used = {p.bucket: db.probe_quota_used(c, p.bucket)
+                for p in cfg.probes}
+        # Un seul SELECT : la version précédente en faisait un par couple
+        # (sonde, période), y compris pour les périodes non couvertes.
+        cursors = db.probe_cursors_all(c)
+    out = []
+    for p in cfg.probes:
+        trips = [t.name for t in cfg.trips
+                 if t.enabled and (not p.trips or t.name in p.trips)]
+        out.append({
+            "name": p.name, "adapter": p.adapter, "carrier": p.travel_host,
+            "enabled": p.enabled,
+            "key_present": bool(os.environ.get(p.key_env)),
+            "key_env": p.key_env,
+            "origins": p.origins, "destinations": p.destinations,
+            "date_mode": p.date_mode, "cells_per_run": p.cells_per_run,
+            "cabin": p.cabin, "passengers": p.passengers,
+            "quota_bucket": p.bucket,
+            "quota_limit": cfg.bucket_quota(p.bucket),
+            "quota_used": used.get(p.bucket, 0),
+            "trips": [
+                {"trip_name": t,
+                 "cells": (coverage.get((p.name, t)) or {}).get("cells", 0),
+                 "best_eur": (coverage.get((p.name, t)) or {}).get("best_eur"),
+                 "last_capture": (coverage.get((p.name, t)) or {})
+                                 .get("last_capture"),
+                 "last_error": (cursors.get((p.name, t)) or {})
+                               .get("last_error"),
+                 "consecutive_failures": (cursors.get((p.name, t)) or {})
+                                         .get("consecutive_failures", 0),
+                 } for t in trips],
+        })
+    return out
 
 
 @app.get("/api/trips/{name}/stats")
@@ -585,6 +665,40 @@ class TripUpdate(BaseModel):
     enabled: bool = True
 
 
+class ProbeUpdate(BaseModel):
+    """Sonde compagnie éditable depuis l'admin.
+
+    Bornée côté serveur : le quota de l'API interrogée est le facteur
+    limitant (100 requêtes/jour pour toute une clé Air France), et un
+    périmètre trop large le viderait avant la fin du premier run.
+
+    `key_env` ne porte QUE le nom d'une variable d'environnement : ce
+    bloc repart au navigateur via GET /api/admin/config.
+
+    extra="forbid", contrairement à TripUpdate : ce modèle décrit la
+    sonde en entier, et `extra="allow"` laissait n'importe quel champ
+    libre — un « api_key » collé à la main, par exemple — traverser la
+    validation, atterrir dans config.yml et repartir au navigateur.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=40)
+    adapter: str = Field(default="afklm", pattern=r"^afklm$")
+    travel_host: str = Field(default="AF", pattern=r"^(AF|KL)$")
+    key_env: str = Field(default="AFKL_API_KEY",
+                         pattern=r"^[A-Z][A-Z0-9_]{2,40}$")
+    origins: list[str] = Field(default_factory=list, max_length=3)
+    destinations: list[str] = Field(default_factory=list, max_length=3)
+    trips: list[str] | None = Field(default=None, max_length=20)
+    date_mode: str = Field(default="grid", pattern=r"^(grid|median)$")
+    cells_per_run: int = Field(default=4, ge=1, le=12)
+    min_interval_s: float = Field(default=1.2, ge=0.5, le=10)
+    cabin: str = Field(default="ECONOMY",
+                       pattern=r"^(ECONOMY|PREMIUM_ECONOMY|BUSINESS)$")
+    passengers: str = Field(default="adults", pattern=r"^(adults|family)$")
+    enabled: bool = True
+
+
 class ConfigUpdate(BaseModel):
     # Bornes serveur : le garde min/max du navigateur ne protégeait rien.
     # adults=10**9 remplissait la mémoire du conteneur, adults=0 coupait
@@ -597,6 +711,10 @@ class ConfigUpdate(BaseModel):
     schedule_cron: str | None = Field(default=None, max_length=64)
     trips: list[TripUpdate] | None = Field(default=None, max_length=20)
     hotels: list[dict] | None = Field(default=None, max_length=20)
+    probes: list[ProbeUpdate] | None = Field(default=None, max_length=4)
+    # Plafond journalier par credential. Borné à 5000 : au-delà, c'est
+    # que le seau a été confondu avec un compteur de requêtes cumulées.
+    quota_buckets: dict[str, int] | None = None
 
 
 @app.put("/api/admin/config", dependencies=[Depends(require_admin)])
@@ -633,6 +751,15 @@ def update_admin_config(body: ConfigUpdate):
         data["trips"] = [t.model_dump(exclude_none=True) for t in body.trips]
     if body.hotels is not None:
         data["hotels"] = body.hotels
+    if body.probes is not None:
+        data["probes"] = [p.model_dump(exclude_none=True) for p in body.probes]
+    if body.quota_buckets is not None:
+        bad = [b for b, v in body.quota_buckets.items() if not 1 <= v <= 5000]
+        if bad:
+            raise HTTPException(
+                status_code=422,
+                detail=f"quota_buckets : plafond hors bornes pour {bad}")
+        data["quota_buckets"] = dict(body.quota_buckets)
     try:
         config.save_raw(data)
     except ValueError as e:

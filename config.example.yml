@@ -83,3 +83,60 @@ trips:
     min_nights: 14
     max_nights: 24
     price_threshold: 850
+
+# ─── Sondes compagnies ────────────────────────────────────────
+# Interrogation directe de l'API officielle d'une compagnie, sur un
+# périmètre VOLONTAIREMENT étroit calibré sur le quota de cette API.
+#
+# À quoi ça sert : fli couvre tout le marché mais ne sonde que la date
+# médiane. Une sonde balaie progressivement la grille aller × retour
+# d'une seule route et reconstruit ainsi la heatmap, perdue depuis la
+# coupure de Duffel.
+#
+# Ce que ça n'est PAS : une source de prix de marché. Une sonde ne voit
+# qu'une compagnie. Ses relevés vivent dans la table `probe_checks` et
+# ne touchent ni l'état, ni la fenêtre glissante, ni les alertes.
+#
+# LA CLÉ N'EST PAS ICI : `key_env` ne porte que le NOM de la variable
+# d'environnement (voir .env.example). Ce fichier est servi au
+# navigateur par GET /api/admin/config.
+
+# Plafond journalier PAR CREDENTIAL, pas par sonde : la clé du seau est
+# le NOM DE LA VARIABLE D'ENVIRONNEMENT qui porte la clé d'API.
+#
+# Mesuré en production le 19/09/2026 : les hosts AF et KL d'une même clé
+# Air France partagent un unique quota de 100 requêtes/jour — épuisé sur
+# AF, le host KL refuse immédiatement. Une sonde KLM ampute donc la sonde
+# Air France. Les erreurs 400 de validation décomptent elles aussi.
+# 80 laisse la marge des run-now manuels et des retries.
+quota_buckets:
+  AFKL_API_KEY: 80
+
+probes:
+  - name: af-cdg-bkk
+    adapter: afklm            # seul adaptateur implémenté
+    travel_host: AF           # AF | KL — change la compagnie, même clé
+    key_env: AFKL_API_KEY     # NOM de la variable d'env, jamais la clé
+    origins: [CDG]            # 3 maximum : le quota est le facteur limitant
+    destinations: [BKK]
+    trips: ["Hiver 2027"]     # vide ou absent = toutes les périodes
+    date_mode: grid           # grid = balayage tournant | median = date médiane
+    cells_per_run: 6          # couples de dates interrogés par run
+    min_interval_s: 1.2       # cadence : Air France impose 1 req/s
+    cabin: ECONOMY
+    # adults  = cfg.adults seulement, comparable aux autres sources
+    # family  = adultes + enfants, prix réellement payé mais comparable
+    #           aux seuls autres relevés de sonde
+    passengers: adults
+    enabled: true
+
+  # Même clé, même seau, autre compagnie : KLM passe par son hub d'Amsterdam
+  # et sort régulièrement moins cher qu'Air France sur les mêmes dates.
+  # Attention, les 100 requêtes/jour sont COMMUNES aux deux sondes.
+  # - name: kl-cdg-bkk
+  #   travel_host: KL
+  #   origins: [CDG]
+  #   destinations: [BKK]
+  #   trips: ["Hiver 2027"]
+  #   cells_per_run: 4
+  #   enabled: false
